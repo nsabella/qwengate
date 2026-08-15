@@ -382,8 +382,8 @@ describe('convertOpenAIResponseToAnthropic', () => {
     const content: any[] = [];
     const REQUIRED_PARAMS: Record<string, string[]> = {
       Bash: ['command'],
-      Read: ['filePath'],
-      Edit: ['filePath', 'oldString', 'newString'],
+      Read: ['file_path'],
+      Edit: ['file_path', 'old_string', 'new_string'],
     };
     function mapParamName(paramName: string): string {
       const SNAKE_TO_CAMEL: Record<string, string> = {
@@ -617,8 +617,8 @@ describe('Tool parameter name mapping', () => {
 describe('Tool call validation', () => {
   const REQUIRED_PARAMS: Record<string, string[]> = {
     Bash: ['command'],
-    Read: ['filePath'],
-    Edit: ['filePath', 'oldString', 'newString'],
+    Read: ['file_path'],
+    Edit: ['file_path', 'old_string', 'new_string'],
   };
 
   function isValidToolCall(name: string, args: any): boolean {
@@ -640,15 +640,15 @@ describe('Tool call validation', () => {
     expect(isValidToolCall('Bash', { command: null })).toBe(false);
   });
 
-  test('Read requires filePath', () => {
-    expect(isValidToolCall('Read', { filePath: '/tmp/x' })).toBe(true);
-    expect(isValidToolCall('Read', { file_path: '/tmp/x' })).toBe(false);
+  test('Read requires file_path', () => {
+    expect(isValidToolCall('Read', { file_path: '/tmp/x' })).toBe(true);
+    expect(isValidToolCall('Read', { filePath: '/tmp/x' })).toBe(false);
   });
 
-  test('Edit requires filePath, oldString, newString', () => {
-    expect(isValidToolCall('Edit', { filePath: '/tmp/x', oldString: 'a', newString: 'b' })).toBe(true);
-    expect(isValidToolCall('Edit', { filePath: '/tmp/x' })).toBe(false);
-    expect(isValidToolCall('Edit', { filePath: '/tmp/x', oldString: 'a' })).toBe(false);
+  test('Edit requires file_path, old_string, new_string', () => {
+    expect(isValidToolCall('Edit', { file_path: '/tmp/x', old_string: 'a', new_string: 'b' })).toBe(true);
+    expect(isValidToolCall('Edit', { file_path: '/tmp/x' })).toBe(false);
+    expect(isValidToolCall('Edit', { file_path: '/tmp/x', old_string: 'a' })).toBe(false);
   });
 
   test('unknown tool passes with any params', () => {
@@ -677,8 +677,8 @@ describe('snake_case to camelCase mapping', () => {
 
   const REQUIRED_PARAMS: Record<string, string[]> = {
     Bash: ['command'],
-    Read: ['filePath'],
-    Edit: ['filePath', 'oldString', 'newString'],
+    Read: ['file_path'],
+    Edit: ['file_path', 'old_string', 'new_string'],
   };
 
   function isValidToolCall(name: string, args: any): boolean {
@@ -692,20 +692,18 @@ describe('snake_case to camelCase mapping', () => {
     return true;
   }
 
-  test('Read with file_path passes after mapping', () => {
+  test('Read with file_path passes without mapping', () => {
     const raw = { file_path: '/tmp/x' };
-    const mapped = mapArgs(raw);
-    expect(isValidToolCall('Read', mapped)).toBe(true);
-    expect(mapped.filePath).toBe('/tmp/x');
+    expect(isValidToolCall('Read', raw)).toBe(true);
+    expect(raw.file_path).toBe('/tmp/x');
   });
 
-  test('Edit with snake_case params passes after mapping', () => {
+  test('Edit with snake_case params passes without mapping', () => {
     const raw = { file_path: '/tmp/x', old_string: 'a', new_string: 'b' };
-    const mapped = mapArgs(raw);
-    expect(isValidToolCall('Edit', mapped)).toBe(true);
-    expect(mapped.filePath).toBe('/tmp/x');
-    expect(mapped.oldString).toBe('a');
-    expect(mapped.newString).toBe('b');
+    expect(isValidToolCall('Edit', raw)).toBe(true);
+    expect(raw.file_path).toBe('/tmp/x');
+    expect(raw.old_string).toBe('a');
+    expect(raw.new_string).toBe('b');
   });
 
   test('Bash command unchanged by mapping', () => {
@@ -729,9 +727,9 @@ describe('local_mcp pipeline to Claude Code', () => {
   // Replicate REQUIRED_PARAMS + helpers from handleAnthropicStream
   const REQUIRED_PARAMS: Record<string, string[]> = {
     Bash: ['command'],
-    Read: ['filePath'],
-    Edit: ['filePath', 'oldString', 'newString'],
-    Write: ['filePath', 'content'],
+    Read: ['file_path'],
+    Edit: ['file_path', 'old_string', 'new_string'],
+    Write: ['file_path', 'content'],
   };
 
   function mapParamName(toolName: string, paramName: string): string {
@@ -764,12 +762,6 @@ describe('local_mcp pipeline to Claude Code', () => {
       /* ignore */
     }
     if (!args || typeof args !== 'object') return { valid: false, fixedArgs: {} };
-
-    const mapped: any = {};
-    for (const [k, v] of Object.entries(args)) {
-      mapped[mapParamName(tc.name, k)] = v;
-    }
-    args = mapped;
 
     const toolName = normalizeToolName(tc.name);
     const required = REQUIRED_PARAMS[toolName];
@@ -842,7 +834,7 @@ describe('local_mcp pipeline to Claude Code', () => {
     expect(block.content_block.id).toStartWith('call_');
   });
 
-  test('local_mcp Bash with snake_case file_path is mapped to filePath', async () => {
+  test('local_mcp Read with file_path passes validation (no mapping)', async () => {
     const { extractLocalMcpToolCalls } = await import('../routes/chatStreamingHelpers.ts');
 
     const sseChunk = {
@@ -864,7 +856,7 @@ describe('local_mcp pipeline to Claude Code', () => {
     expect(calls[0].name).toBe('Read');
     expect(calls[0].arguments).toEqual({ file_path: '/tmp/test.txt' });
 
-    // Validate — snake_case → camelCase mapping should make this valid
+    // Validate — no mapping needed, snake_case is passed through
     const validToolCalls: any[] = [];
     const validArgs: any[] = [];
     for (const tc of calls) {
@@ -878,10 +870,10 @@ describe('local_mcp pipeline to Claude Code', () => {
     expect(validToolCalls.length).toBe(1);
     const block = emitToolUseBlock(validToolCalls[0], validArgs[0]);
     expect(block.content_block.name).toBe('Read');
-    expect(block.content_block.input).toEqual({ filePath: '/tmp/test.txt' });
+    expect(block.content_block.input).toEqual({ file_path: '/tmp/test.txt' });
   });
 
-  test('local_mcp with Write tool (filePath + content) passes validation', async () => {
+  test('local_mcp with Write tool (file_path + content) passes validation', async () => {
     const { extractLocalMcpToolCalls } = await import('../routes/chatStreamingHelpers.ts');
 
     const sseChunk = {
@@ -917,7 +909,7 @@ describe('local_mcp pipeline to Claude Code', () => {
     expect(validToolCalls.length).toBe(1);
     const block = emitToolUseBlock(validToolCalls[0], validArgs[0]);
     expect(block.content_block.name).toBe('Write');
-    expect(block.content_block.input).toEqual({ filePath: '/tmp/output.txt', content: 'hello world' });
+    expect(block.content_block.input).toEqual({ file_path: '/tmp/output.txt', content: 'hello world' });
   });
 
   test('local_mcp with lowercase tool name is normalized to PascalCase', async () => {
@@ -1045,13 +1037,13 @@ describe('local_mcp pipeline to Claude Code', () => {
       type: 'tool_use',
       id: expect.stringMatching(/^call_/),
       name: 'Read',
-      input: { filePath: '/tmp/x' },
+      input: { file_path: '/tmp/x' },
     });
     expect(blocks[2].content_block).toEqual({
       type: 'tool_use',
       id: expect.stringMatching(/^call_/),
       name: 'Edit',
-      input: { filePath: '/tmp/x', oldString: 'a', newString: 'b' },
+      input: { file_path: '/tmp/x', old_string: 'a', new_string: 'b' },
     });
   });
 

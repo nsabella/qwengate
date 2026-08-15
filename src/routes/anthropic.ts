@@ -198,19 +198,10 @@ function convertOpenAIResponseToAnthropic(openAIResp: any, requestModel: string)
   // ponytail: static Claude Code required param map — adapt if tools vary
   const REQUIRED_PARAMS: Record<string, string[]> = {
     Bash: ['command'],
-    Read: ['filePath'],
-    Edit: ['filePath', 'oldString', 'newString'],
-    Write: ['filePath', 'content'],
+    Read: ['file_path'],
+    Edit: ['file_path', 'old_string', 'new_string'],
+    Write: ['file_path', 'content'],
   };
-
-  function mapParamName(paramName: string): string {
-    const SNAKE_TO_CAMEL: Record<string, string> = {
-      file_path: 'filePath',
-      old_string: 'oldString',
-      new_string: 'newString',
-    };
-    return SNAKE_TO_CAMEL[paramName] || paramName;
-  }
 
   function isValidToolCall(name: string, args: any): boolean {
     const required = REQUIRED_PARAMS[name];
@@ -232,21 +223,16 @@ function convertOpenAIResponseToAnthropic(openAIResp: any, requestModel: string)
         /* ignore */
       }
       if (!args || typeof args !== 'object') continue;
-      // Map snake_case to camelCase
-      const mapped: any = {};
-      for (const [k, v] of Object.entries(args)) {
-        mapped[mapParamName(k)] = v;
-      }
       const normalizedName = normalizeToolName(tc.function.name);
-      if (!isValidToolCall(normalizedName, mapped)) {
+      if (!isValidToolCall(normalizedName, args)) {
         logStore.log(
           'debug',
           'chat',
-          `[Anthropic] Skipped invalid tool call in non-streaming: ${tc.function?.name} args=${JSON.stringify(mapped)}`,
+          `[Anthropic] Skipped invalid tool call in non-streaming: ${tc.function?.name} args=${JSON.stringify(args)}`,
         );
         continue;
       }
-      content.push({ type: 'tool_use', id: tc.id, name: normalizedName, input: mapped });
+      content.push({ type: 'tool_use', id: tc.id, name: normalizedName, input: args });
     }
   }
   // Anthropic doesn't send text + tool_use together — prefer tool_use
@@ -810,21 +796,10 @@ async function handleAnthropicStream(
       // ponytail: static Claude Code required param map — upgrade if tools vary
       const REQUIRED_PARAMS: Record<string, string[]> = {
         Bash: ['command'],
-        Read: ['filePath'],
-        Edit: ['filePath', 'oldString', 'newString'],
-        Write: ['filePath', 'content'],
+        Read: ['file_path'],
+        Edit: ['file_path', 'old_string', 'new_string'],
+        Write: ['file_path', 'content'],
       };
-
-      // ponytail: snake_case → camelCase mapping for Qwen param names
-      function mapParamName(toolName: string, paramName: string): string {
-        const SNAKE_TO_CAMEL: Record<string, string> = {
-          file_path: 'filePath',
-          old_string: 'oldString',
-          new_string: 'newString',
-          tool_call_id: 'toolCallId',
-        };
-        return SNAKE_TO_CAMEL[paramName] || paramName;
-      }
 
       function validateToolCall(tc: ParsedToolCall): { valid: boolean; fixedArgs: any } {
         let args: any = {};
@@ -834,13 +809,6 @@ async function handleAnthropicStream(
           /* ignore */
         }
         if (!args || typeof args !== 'object') return { valid: false, fixedArgs: {} };
-
-        // Map snake_case to camelCase
-        const mapped: any = {};
-        for (const [k, v] of Object.entries(args)) {
-          mapped[mapParamName(tc.name, k)] = v;
-        }
-        args = mapped;
 
         const toolName = normalizeToolName(tc.name);
         const required = REQUIRED_PARAMS[toolName];
