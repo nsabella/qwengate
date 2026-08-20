@@ -193,6 +193,20 @@ export function buildQwenMessages(messages: any[], body: any, availableTokens: n
     systemParts.push(
       `You have access to the following tools:\n${toolDescriptions}\n\nTo call a tool, respond with the tool call in the appropriate format.`,
     );
+  } else if (toolResultObjects.length > 0 && !featureConfig.local_mcp) {
+    // Fallback: re-register tools from conversation history when body.tools is
+    // absent (client sent tool results without re-sending tool definitions).
+    // Without this, Qwen's session state doesn't include the tools and responds
+    // with "tool doesn't exist" on subsequent tool calls.
+    const localMcp: Record<string, any> = {};
+    localMcp['★'] = {};
+    for (const r of toolResultObjects) {
+      localMcp['★'][r.tool] = {
+        description: '',
+        input_schema: { type: 'object', properties: {} },
+      };
+    }
+    featureConfig.local_mcp = localMcp;
   }
 
   // Single message (Qwen API only accepts 1 message per chat)
