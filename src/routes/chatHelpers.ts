@@ -56,7 +56,7 @@ export interface BuildQwenMessagesResult {
 
 // ── Business logic ───────────────────────────────────────────────
 
-export function buildQwenMessages(messages: any[], body: any, availableTokens: number, _toolCalling: boolean): BuildQwenMessagesResult {
+export function buildQwenMessages(messages: any[], body: any, availableTokens: number, _toolCalling: boolean, cachedTools?: any[]): BuildQwenMessagesResult {
   const timestamp = Math.floor(Date.now() / 1000);
   const model = (body.model || '').replace('-no-thinking', '');
 
@@ -194,17 +194,30 @@ export function buildQwenMessages(messages: any[], body: any, availableTokens: n
       `You have access to the following tools:\n${toolDescriptions}\n\nTo call a tool, respond with the tool call in the appropriate format.`,
     );
   } else if (toolResultObjects.length > 0 && !featureConfig.local_mcp) {
-    // Fallback: re-register tools from conversation history when body.tools is
-    // absent (client sent tool results without re-sending tool definitions).
-    // Without this, Qwen's session state doesn't include the tools and responds
-    // with "tool doesn't exist" on subsequent tool calls.
+    // Fallback: re-register tools when body.tools is absent (client sent tool
+    // results without re-sending tool definitions).
     const localMcp: Record<string, any> = {};
     localMcp['★'] = {};
-    for (const r of toolResultObjects) {
-      localMcp['★'][r.tool] = {
-        description: '',
-        input_schema: { type: 'object', properties: {} },
-      };
+    if (cachedTools && Array.isArray(cachedTools) && cachedTools.length > 0) {
+      // Use cached tool definitions from the first request — preserves full
+      // schema so the model knows what parameters each tool expects.
+      for (const t of cachedTools) {
+        const fn = t.function || {};
+        localMcp['★'][fn.name] = {
+          description: fn.description || '',
+          input_schema: fn.parameters || { type: 'object', properties: {} },
+        };
+      }
+    } else {
+      // Last resort: re-register from tool result names with empty schemas.
+      // The model will see the tools are available but won't know their
+      // parameter shapes — better than "tool doesn't exist".
+      for (const r of toolResultObjects) {
+        localMcp['★'][r.tool] = {
+          description: '',
+          input_schema: { type: 'object', properties: {} },
+        };
+      }
     }
     featureConfig.local_mcp = localMcp;
   }

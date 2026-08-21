@@ -13,6 +13,8 @@ interface PoolEntry {
   cachedHeaders?: { cookie: string; userAgent: string };
   /** Which account email this session is bound to */
   accountEmail?: string;
+  /** Tool definitions from the first request — used as fallback on follow-up requests */
+  cachedTools?: any[];
 }
 
 export function formatQwenEnvelopeError(json: any): string {
@@ -99,6 +101,7 @@ export class SessionPool {
     cachedHeaders?: { cookie: string; userAgent: string },
     accountEmail?: string,
     isSuccess: boolean = true,
+    cachedTools?: any[],
   ): Promise<void> {
     // Idempotency guard: if chatId not tracked as active, this session was already released.
     // Prevents double-release from competing cleanup paths (setTimeout + finally).

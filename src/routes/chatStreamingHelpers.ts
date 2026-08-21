@@ -111,6 +111,7 @@ export interface StreamProcessingCtx {
   enableContentFiltering: boolean;
   cleanOutput: boolean;
   logId: string;
+  chatId: string;
   resolvedEmail: string;
   ampState: AmplificationGuardState;
   qwenAbortController: AbortController;
@@ -209,7 +210,7 @@ export async function processStreamData(data: any, state: StreamProcessingState,
           if (loopMsg) {
             logStore.log('debug', 'chat', `  [🛑 CROSS-REQUEST LOOP] Streaming ${tc.name}: detected loop, blocking`);
             // Store correction in pendingCorrections for next request
-            pendingCorrections.set(ctx.resolvedEmail, [...(pendingCorrections.get(ctx.resolvedEmail) || []), loopMsg]);
+            pendingCorrections.set(ctx.chatId, [...(pendingCorrections.get(ctx.chatId) || []), loopMsg]);
             blockedToolCalls.push(tc);
           } else {
             remaining.push(tc);
@@ -372,7 +373,7 @@ export async function processStreamData(data: any, state: StreamProcessingState,
         const loopMsg = checkCrossRequestToolLoop(tc.name, tc.parameters);
         if (loopMsg) {
           logStore.log('debug', 'chat', `  [🛑 CROSS-REQUEST LOOP] Streaming ${tc.name}: detected loop, blocking`);
-          pendingCorrections.set(ctx.resolvedEmail, [...(pendingCorrections.get(ctx.resolvedEmail) || []), loopMsg]);
+          pendingCorrections.set(ctx.chatId, [...(pendingCorrections.get(ctx.chatId) || []), loopMsg]);
           blockedToolCalls.push(tc);
         } else {
           remaining.push(tc);

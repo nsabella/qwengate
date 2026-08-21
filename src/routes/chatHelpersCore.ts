@@ -253,13 +253,13 @@ export function checkCrossRequestToolLoop(tool: string, args: any): string | nul
   const recentSameArgs = history.filter((r) => r.args === argsKey);
 
   if (recentSameArgs.length >= 2) {
-    // Loop detected! Return a forceful correction prompt
+    // Loop detected — return a correction prompt.
+    // Kept gentle to avoid triggering model refusal of all tool calls.
     toolCallHistory.set(tool, history); // Save pruned history
     return (
-      `[CROSS-REQUEST LOOP DETECTED] You have called "${tool}" with the same arguments ${recentSameArgs.length + 1} times across multiple turns. ` +
-      `This is a loop. STOP calling "${tool}" again. ` +
-      `You already have the results from the previous calls. Use those results to respond to the user NOW. ` +
-      `Do NOT call "${tool}" again under any circumstances.`
+      `[CROSS-REQUEST LOOP DETECTED] You called "${tool}" with the same arguments ${recentSameArgs.length + 1} times across multiple turns. ` +
+      `You already have the results from those calls. ` +
+      `Use those results to respond to the user now instead of calling the tool again.`
     );
   }
 

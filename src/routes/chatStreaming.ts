@@ -69,6 +69,7 @@ export async function handleStreamingRequest(ctx: StreamingContext): Promise<Res
         enableContentFiltering,
         cleanOutput,
         logId,
+        chatId: session.chatId,
         resolvedEmail,
         ampState,
         qwenAbortController,
@@ -103,6 +104,7 @@ export async function handleStreamingRequest(ctx: StreamingContext): Promise<Res
           resolvedEmail,
           sessionPool,
           false,
+          body.tools,
         );
         streamReleased = true;
         return;
@@ -156,6 +158,7 @@ export async function handleStreamingRequest(ctx: StreamingContext): Promise<Res
           resolvedEmail,
           sessionPool,
           false,
+          body.tools,
         );
       }
     }

@@ -119,7 +119,7 @@ async function setupSession(messages: any[], body: OpenAIRequest, availableToken
     qwenMessages: processedMessages,
     systemContent,
     toolResultsContent,
-  } = buildQwenMessages(cleanedMessages, body, availableTokens, toolCalling);
+  } = buildQwenMessages(cleanedMessages, body, availableTokens, toolCalling, body.tools);
 
   // ── Inline content truncation ─────────────────────────────────
   // Keep the most recent ~50k characters inline; push older history
@@ -252,7 +252,7 @@ async function setupSession(messages: any[], body: OpenAIRequest, availableToken
       );
     } catch (err: any) {
       // Release the acquired session to prevent pool exhaustion + inFlight leak
-      sessionPool.release(session.chatId, nextParentId, sessionHeaders, resolvedEmail, false);
+      sessionPool.release(session.chatId, nextParentId, sessionHeaders, resolvedEmail, false, body.tools);
 
       logStore.log(
         'debug',
@@ -324,7 +324,7 @@ async function setupSession(messages: any[], body: OpenAIRequest, availableToken
       logStore.addError(logId, `First-chunk timeout for ${resolvedEmail}`);
       streamReader.cancel().catch(() => {});
       qwenAbortController?.abort();
-      sessionPool.release(session.chatId, nextParentId, sessionHeaders, resolvedEmail, false);
+      sessionPool.release(session.chatId, nextParentId, sessionHeaders, resolvedEmail, false, body.tools);
       lastFailedEmail = resolvedEmail;
       lastError = timeoutErr as Error;
       continue;

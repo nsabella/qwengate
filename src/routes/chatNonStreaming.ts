@@ -389,7 +389,7 @@ export async function handleNonStreamingRequest(ctx: NonStreamingContext): Promi
     }
 
     nonStreamReleased = true;
-    sessionPool.release(session.chatId, state.nextParentId, sessionHeaders, resolvedEmail);
+    sessionPool.release(session.chatId, state.nextParentId, sessionHeaders, resolvedEmail, true, ctx.body.tools);
     const result = await processContentChunks(state, ctx);
     logFinalized = true;
     return result;
@@ -406,7 +406,7 @@ export async function handleNonStreamingRequest(ctx: NonStreamingContext): Promi
       /* reader already cancelled */
     }
     if (!nonStreamReleased) {
-      sessionPool.release(session.chatId, state.nextParentId, sessionHeaders, resolvedEmail, false);
+      sessionPool.release(session.chatId, state.nextParentId, sessionHeaders, resolvedEmail, false, ctx.body.tools);
     }
   }
 }

@@ -297,7 +297,7 @@ async function setupAnthropicSession(
     qwenMessages: processedMessages,
     systemContent,
     toolResultsContent,
-  } = buildQwenMessages(cleanedMessages, body, availableTokens, toolCalling);
+  } = buildQwenMessages(cleanedMessages, body, availableTokens, toolCalling, body.tools);
 
   const MAX_INLINE_CHARS = 50000;
   let inlineContent = processedMessages[0].content as string;
@@ -415,7 +415,7 @@ async function setupAnthropicSession(
         body.tool_choice,
       );
     } catch (err: any) {
-      sessionPool.release(session.chatId, nextParentId, sessionHeaders, resolvedEmail, false);
+      sessionPool.release(session.chatId, nextParentId, sessionHeaders, resolvedEmail, false, body.tools);
       logStore.log(
         'warn',
         'chat',
@@ -477,7 +477,7 @@ async function setupAnthropicSession(
       logStore.addError(logId, `First-chunk timeout for ${resolvedEmail}`);
       streamReader.cancel().catch(() => {});
       qwenAbortController?.abort();
-      sessionPool.release(session.chatId, nextParentId, sessionHeaders, resolvedEmail, false);
+      sessionPool.release(session.chatId, nextParentId, sessionHeaders, resolvedEmail, false, body.tools);
       lastFailedEmail = resolvedEmail;
       lastError = timeoutErr as Error;
       continue;
@@ -933,7 +933,7 @@ async function handleAnthropicStream(
         },
         finishReason: stopReason,
       });
-      sessionPool.release(session.chatId, nextParentId, sessionHeaders, resolvedEmail);
+      sessionPool.release(session.chatId, nextParentId, sessionHeaders, resolvedEmail, true, body.tools);
     } catch (streamErr: any) {
       logStore.addError(logId, streamErr.message || String(streamErr));
     } finally {
@@ -943,7 +943,7 @@ async function handleAnthropicStream(
           finishReason: 'error',
         });
         try {
-          sessionPool.release(session.chatId, nextParentId, sessionHeaders, resolvedEmail, false);
+          sessionPool.release(session.chatId, nextParentId, sessionHeaders, resolvedEmail, false, body.tools);
         } catch {
           /* ignore */
         }
