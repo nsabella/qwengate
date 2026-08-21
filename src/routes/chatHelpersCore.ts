@@ -217,6 +217,91 @@ setInterval(
   5 * 60 * 1000,
 ).unref();
 
+// ── Cross-request tool call loop prevention ───────────────────────
+
+interface ToolCallRecord {
+  tool: string;
+  args: string;
+  timestamp: number;
+}
+
+/**
+ * Tracks tool calls across requests to detect loops that persist
+ * even after correction prompts. When a tool is called that was
+ * called in a previous request (within the last 5 minutes), it
+ * triggers a more forceful loop-breaking correction.
+ */
+const toolCallHistory = new Map<string, ToolCallRecord[]>();
+const TOOL_CALL_HISTORY_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_TOOL_CALL_HISTORY = 100; // Max entries per tool
+
+/**
+ * Check if a tool call is part of a cross-request loop.
+ * Returns null if no loop detected, or a correction prompt if it is.
+ */
+export function checkCrossRequestToolLoop(tool: string, args: any): string | null {
+  const argsKey = JSON.stringify(canonicalizeArgs(args));
+  const now = Date.now();
+
+  // Get or create history for this tool
+  let history = toolCallHistory.get(tool) || [];
+
+  // Prune old entries
+  history = history.filter((r) => now - r.timestamp < TOOL_CALL_HISTORY_WINDOW_MS);
+
+  // Check if this exact tool+args was called recently
+  const recentSameArgs = history.filter((r) => r.args === argsKey);
+
+  if (recentSameArgs.length >= 2) {
+    // Loop detected! Return a forceful correction prompt
+    toolCallHistory.set(tool, history); // Save pruned history
+    return (
+      `[CROSS-REQUEST LOOP DETECTED] You have called "${tool}" with the same arguments ${recentSameArgs.length + 1} times across multiple turns. ` +
+      `This is a loop. STOP calling "${tool}" again. ` +
+      `You already have the results from the previous calls. Use those results to respond to the user NOW. ` +
+      `Do NOT call "${tool}" again under any circumstances.`
+    );
+  }
+
+  // Add to history
+  history.push({ tool, args: argsKey, timestamp: now });
+  if (history.length > MAX_TOOL_CALL_HISTORY) {
+    history = history.slice(-MAX_TOOL_CALL_HISTORY);
+  }
+  toolCallHistory.set(tool, history);
+
+  return null;
+}
+
+function canonicalizeArgs(args: any): any {
+  if (typeof args !== 'object' || args === null) return args;
+  if (Array.isArray(args)) return args.map((a) => canonicalizeArgs(a));
+  return Object.keys(args)
+    .sort()
+    .reduce((acc: any, key) => {
+      acc[key] = canonicalizeArgs(args[key]);
+      return acc;
+    }, {});
+}
+
+// Prune old tool call history every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [tool, history] of toolCallHistory.entries()) {
+    const pruned = history.filter((r) => now - r.timestamp < TOOL_CALL_HISTORY_WINDOW_MS);
+    if (pruned.length === 0) {
+      toolCallHistory.delete(tool);
+    } else {
+      toolCallHistory.set(tool, pruned);
+    }
+  }
+}, 10 * 60 * 1000).unref();
+
+/** Reset tool call history (for testing). */
+export function resetToolCallHistory(): void {
+  toolCallHistory.clear();
+}
+
 export function parseQwenErrorPayload(
   raw: string,
 ): { message: string; status: import('hono/utils/http-status').ContentfulStatusCode } | null {
@@ -318,6 +403,8 @@ export interface ToolCallProcessingOptions {
   toolSpamGuard: ToolSpamGuard;
   correctionPrompts: string[];
   maxToolCalls: number;
+  /** Cross-request loop detector — tracks tool calls across multiple requests. */
+  checkCrossRequestLoop?: boolean;
 }
 
 export function processToolCallsThroughGuard(toolCalls: any[], toolCallsOut: any[], options: ToolCallProcessingOptions): void {
@@ -344,6 +431,16 @@ export function processToolCallsThroughGuard(toolCalls: any[], toolCallsOut: any
       logStore.log('debug', 'chat', `  [🛑 TOOL SPAM${label ? ' ' + label : ''}] ${tc.name}: repeated call blocked`);
       correctionPrompts.push(spamCheck.correctionPrompt);
       continue;
+    }
+    // Cross-request loop detection: same tool+args called 2+ times across
+    // multiple requests within the last 5 minutes.
+    if (checkCrossRequestLoop) {
+      const loopMsg = checkCrossRequestToolLoop(tc.name, tc.arguments);
+      if (loopMsg) {
+        logStore.log('debug', 'chat', `  [🛑 CROSS-REQUEST LOOP${label ? ' ' + label : ''}] ${tc.name}: detected loop, blocking`);
+        correctionPrompts.push(loopMsg);
+        continue;
+      }
     }
     if (toolCallsOut.length >= maxToolCalls) {
       logStore.log(

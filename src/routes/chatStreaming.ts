@@ -74,6 +74,7 @@ export async function handleStreamingRequest(ctx: StreamingContext): Promise<Res
         qwenAbortController,
         qwenLogFile: ctx.qwenLogFile,
         emittedToolCallCount: 0,
+        checkCrossRequestLoop: true,
       };
 
       const bufferRef = { text: '' };

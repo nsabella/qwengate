@@ -6,10 +6,12 @@ import { filterContent } from '../utils/contentFilter.ts';
 import { THINK_TAG_NAMES, TOOL_CALL_KEYWORDS } from '../utils/tagNames.ts';
 import {
   type AmplificationGuardState,
+  checkCrossRequestToolLoop,
   cleanThinkTags,
   detectCumulativeChunk,
   extractDeltaContent,
   getSnapshotDelta,
+  pendingCorrections,
 } from './chatHelpers.ts';
 
 import { writeContentDelta, writeReasoningEvent, writeToolCallEvent } from './writeHelpers.ts';
@@ -114,6 +116,8 @@ export interface StreamProcessingCtx {
   qwenAbortController: AbortController;
   qwenLogFile?: string;
   sseEventCount?: number;
+  /** Cross-request loop detector — tracks tool calls across multiple requests. */
+  checkCrossRequestLoop?: boolean;
 }
 
 export type ProcessStreamResult = 'continue' | 'break_stream';
@@ -194,6 +198,34 @@ export async function processStreamData(data: any, state: StreamProcessingState,
         state.loggedToolCalls.add(key);
         return true;
       });
+
+      // Cross-request loop detection: block if same tool+args called 2+ times
+      // across multiple requests within the last 5 minutes.
+      if (ctx.checkCrossRequestLoop) {
+        const blockedToolCalls: typeof newToolCalls = [];
+        const remaining: typeof newToolCalls = [];
+        for (const tc of newToolCalls) {
+          const loopMsg = checkCrossRequestToolLoop(tc.name, tc.arguments);
+          if (loopMsg) {
+            logStore.log('debug', 'chat', `  [🛑 CROSS-REQUEST LOOP] Streaming ${tc.name}: detected loop, blocking`);
+            // Store correction in pendingCorrections for next request
+            pendingCorrections.set(ctx.resolvedEmail, [...(pendingCorrections.get(ctx.resolvedEmail) || []), loopMsg]);
+            blockedToolCalls.push(tc);
+          } else {
+            remaining.push(tc);
+          }
+        }
+        // Emit blocked tool calls' results (so the user sees what was already called)
+        // but mark them as already-seen so they don't loop again
+        if (blockedToolCalls.length > 0) {
+          for (const tc of blockedToolCalls) {
+            const blockKey = `${tc.name}:${JSON.stringify(tc.arguments)}`;
+            state.loggedToolCalls.add(blockKey);
+          }
+        }
+        // Replace newToolCalls with only the unblocked ones
+        Object.assign(newToolCalls, remaining);
+      }
 
       if (newToolCalls.length > 0) {
         logStore.updateEntry(logId, (entry) => {
@@ -330,6 +362,30 @@ export async function processStreamData(data: any, state: StreamProcessingState,
       state.loggedToolCalls.add(key);
       return true;
     });
+
+    // Cross-request loop detection: block if same tool+args called 2+ times
+    // across multiple requests within the last 5 minutes.
+    if (ctx.checkCrossRequestLoop) {
+      const blockedToolCalls: typeof newToolCalls = [];
+      const remaining: typeof newToolCalls = [];
+      for (const tc of newToolCalls) {
+        const loopMsg = checkCrossRequestToolLoop(tc.name, tc.parameters);
+        if (loopMsg) {
+          logStore.log('debug', 'chat', `  [🛑 CROSS-REQUEST LOOP] Streaming ${tc.name}: detected loop, blocking`);
+          pendingCorrections.set(ctx.resolvedEmail, [...(pendingCorrections.get(ctx.resolvedEmail) || []), loopMsg]);
+          blockedToolCalls.push(tc);
+        } else {
+          remaining.push(tc);
+        }
+      }
+      // Mark blocked tool calls as already-seen so they don't loop again
+      for (const tc of blockedToolCalls) {
+        const blockKey = `${tc.name}:${JSON.stringify(tc.parameters)}`;
+        state.loggedToolCalls.add(blockKey);
+      }
+      // Replace newToolCalls with only the unblocked ones
+      Object.assign(newToolCalls, remaining);
+    }
 
     if (newToolCalls.length > 0) {
       logStore.updateEntry(logId, (entry) => {

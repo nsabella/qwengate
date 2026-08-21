@@ -137,6 +137,7 @@ function processAnswerDelta(delta: any, state: StreamProcessorState, ctx: NonStr
         correctionPrompts: state.correctionPrompts,
         maxToolCalls: MAX_TOOL_CALLS_PER_TURN,
         logParsed: true,
+        checkCrossRequestLoop: true,
       });
     }
     state.lastParsedPosition = state.lastFullContent.length;
@@ -213,6 +214,7 @@ function parseQwenResponse(line: string, state: StreamProcessorState, ctx: NonSt
         correctionPrompts: state.correctionPrompts,
         maxToolCalls: MAX_TOOL_CALLS_PER_TURN,
         logParsed: true,
+        checkCrossRequestLoop: true,
       });
     }
   }
