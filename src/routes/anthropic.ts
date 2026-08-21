@@ -293,11 +293,15 @@ async function setupAnthropicSession(
     });
   }
 
-  const {
-    qwenMessages: processedMessages,
+  let qwenMessages: any[];
+  let systemContent: string | undefined;
+  let toolResultsContent: string | undefined;
+  ({
+    qwenMessages,
     systemContent,
     toolResultsContent,
-  } = buildQwenMessages(cleanedMessages, body, availableTokens, toolCalling, body.tools);
+  } = buildQwenMessages(cleanedMessages, body, availableTokens, toolCalling, body.tools));
+  const processedMessages = qwenMessages;
 
   const MAX_INLINE_CHARS = 50000;
   let inlineContent = processedMessages[0].content as string;
@@ -397,6 +401,20 @@ async function setupAnthropicSession(
     }
     const { session, qwenMessages: sessionMessages, nextParentId, sessionHeaders, resolvedEmail } = sessionResult;
     logStore.log('debug', 'chat', `[Anthropic] Session acquired: ${resolvedEmail} chatId=${session.chatId}`);
+
+    // If body.tools is empty but the session has cached tools from a previous
+    // request, re-run buildQwenMessages() with the cached tools so the model
+    // sees full tool schemas (not empty placeholders).
+    if ((!body.tools || body.tools.length === 0) && session.cachedTools && session.cachedTools.length > 0) {
+      const rebuilt = buildQwenMessages(cleanedMessages, body, availableTokens, toolCalling, session.cachedTools);
+      for (let i = 0; i < processedMessages.length; i++) {
+        processedMessages[i] = rebuilt.qwenMessages[i];
+      }
+      systemContent = rebuilt.systemContent;
+      toolResultsContent = rebuilt.toolResultsContent;
+      logStore.log('debug', 'chat', '[Anthropic] Rebuilt messages with cached tools for session');
+    }
+
     logStore.updateEntry(logId, (entry) => {
       entry.accountEmail = resolvedEmail;
     });

@@ -27,6 +27,8 @@ export class SessionPool {
   private activeSessions = new Set<string>();
   private activeCount = 0;
   private releaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Tool definitions cached per account — survives session turnover */
+  private cachedToolsByAccount = new Map<string, any[]>();
 
   async initialize(): Promise<void> {
     if (process.env.TEST_MOCK_PLAYWRIGHT) {
@@ -41,7 +43,15 @@ export class SessionPool {
   async acquire(email?: string): Promise<PoolEntry> {
     if (process.env.TEST_MOCK_PLAYWRIGHT) {
       const mockId = process.env.TEST_SESSION_ID || 'mock-session';
-      return { chatId: mockId, parentId: null, inUse: true, accountEmail: 'mock@test' };
+      // Inherit cachedTools even in mock mode (for regression tests)
+      const inheritedTools = email ? this.cachedToolsByAccount.get(email) : undefined;
+      if (inheritedTools) {
+        this.cachedToolsByAccount.delete(email);
+      }
+      const entry: PoolEntry = { chatId: mockId, parentId: null, inUse: true, accountEmail: 'mock@test', cachedTools: inheritedTools };
+      this.activeSessions.add(mockId);
+      this.activeCount++;
+      return entry;
     }
 
     const maxAttempts = email ? 1 : Math.max(1, getAllAccountEmails().length);
@@ -67,12 +77,19 @@ export class SessionPool {
           ),
         ]);
         const { headers, chatId } = result;
+        // Inherit cachedTools from previous session for this account (if any).
+        // Cached tools are consumed (deleted) so they're not reused on the next cycle.
+        const inheritedTools = this.cachedToolsByAccount.get(resolvedEmail);
+        if (inheritedTools) {
+          this.cachedToolsByAccount.delete(resolvedEmail);
+        }
         const entry: PoolEntry = {
           chatId,
           parentId: null,
           inUse: true,
           cachedHeaders: { cookie: headers.cookie, userAgent: headers.userAgent },
           accountEmail: headers.email || resolvedEmail,
+          cachedTools: inheritedTools,
         };
         this.activeSessions.add(chatId);
         this.activeCount++;
@@ -116,6 +133,13 @@ export class SessionPool {
       if (isSuccess) {
         incrementTotalRequests(accountEmail);
       }
+    }
+
+    // Persist cachedTools keyed by account email so the next session for this
+    // account can pick them up (sessions are ephemeral, but tool defs aren't).
+    // Only update if new tools are provided; preserve existing cache otherwise.
+    if (cachedTools && cachedTools.length > 0 && accountEmail) {
+      this.cachedToolsByAccount.set(accountEmail, cachedTools);
     }
 
     this.activeSessions.delete(chatId);
