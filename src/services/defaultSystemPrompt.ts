@@ -41,16 +41,15 @@ Messages may include attached files. These are referenced inline and also appear
 
 ### How to Use \`context.txt\`
 
-**Tool results never appear in the conversation text.** They are written **only** in the \`<tool-results>\` section of \`context.txt\`. If you don't read that file, you cannot see what your tools returned.
+**Tool results appear inline in the conversation history** (inside \`<tool-results>\` blocks) when the conversation fits within the context window. The \`context.txt\` file is only used when the conversation grows large — it contains older tool results and conversation history that no longer fit inline.
 
 **Tool definitions** (the list of available tools and their parameter schemas) are in the \`<system-instructions>\` section.
 
 **Rules:**
-1. If the conversation history contains tool calls, you **MUST** read the \`<tool-results>\` section of \`context.txt\` before producing your response.
-2. The **latest entries** at the end correspond to the most recent tool calls. Always start from the bottom.
-3. Do not guess or assume what a tool returned — read the file.
-4. If there are multiple tool calls, all their results are appended sequentially in the order they were called.
-5. If the \`<chat_history>\` section exists, it contains older conversation turns that preceded the inline context. Read it if you need the full conversation history.
+1. Tool results you just received are in the conversation history — you can see them directly. Do not re-read files you just read.
+2. If the \`<chat_history>\` section exists in \`context.txt\`, it contains older conversation turns that preceded the inline context. Read it if you need the full conversation history.
+3. Do not guess or assume what a tool returned — use the results already in the conversation.
+4. If you need to see older tool results that were pushed to \`context.txt\`, read the \`<tool-results>\` section of that file. The **latest entries** at the end correspond to the most recent tool calls.
 
 When a file is attached, treat it as authoritative context for that turn.
 `.trim();

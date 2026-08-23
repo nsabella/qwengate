@@ -16,6 +16,17 @@ function escXml(s: string): string {
 // Re-export everything from core utilities
 export * from './chatHelpersCore.ts';
 
+/** Track which files have been read to detect re-reads.
+ *  Key: file path, Value: number of times read.
+ *  Cleared when conversation is reset or after a long idle period.
+ */
+const readFileTracker = new Map<string, number>();
+
+// Clear the tracker periodically to prevent unbounded memory growth
+setInterval(() => {
+  readFileTracker.clear();
+}, 5 * 60 * 1000); // Clear every 5 minutes
+
 /** Pre-compiled regex patterns for user content sanitization */
 const SYSTEM_REMINDER_RE = /<system-reminder\b[^>]*>([\s\S]*?)<\/system-reminder>/gi;
 const TAG_STRIP_RE = /<(?:system|instruction|prompt|rule)\b[^>]*>[\s\S]*?<\/(?:system|instruction|prompt|rule)>/gi;
@@ -150,12 +161,50 @@ export function buildQwenMessages(messages: any[], body: any, availableTokens: n
       }
 
       const truncated = compressToolResult(contentStr || '');
+
+      // Add "already read" detection for Read tool
+      let readNote = '';
+      if (toolName === 'Read') {
+        // Extract file path from tool call arguments
+        let filePath = '';
+        if (msg.tool_call_id) {
+          for (let j = i - 1; j >= 0; j--) {
+            const prevMsg = messages[j];
+            if (prevMsg.role === 'assistant' && prevMsg.tool_calls) {
+              const call = prevMsg.tool_calls.find((tc: any) => tc.id === msg.tool_call_id);
+              if (call) {
+                const args = call.function?.arguments;
+                if (typeof args === 'string') {
+                  try {
+                    const parsed = JSON.parse(args);
+                    filePath = parsed.path || parsed.file || '';
+                  } catch {
+                    // ignore
+                  }
+                } else if (args && typeof args === 'object') {
+                  filePath = args.path || args.file || '';
+                }
+                break;
+              }
+            }
+          }
+        }
+        if (filePath) {
+          const count = (readFileTracker.get(filePath) || 0) + 1;
+          readFileTracker.set(filePath, count);
+          if (count > 1) {
+            readNote = `\n\n[NOTE: You already read this file ${count - 1} time(s) in this conversation. The content above is the same as what you previously received.]`;
+          }
+        }
+      }
+
+      const finalContent = readNote ? readNote + truncated : truncated;
       toolResultObjects.push({
         type: 'function',
         tool: toolName || 'unknown',
         result: {
           success: true,
-          stdout: truncated,
+          stdout: finalContent,
           stderr: '',
           command: toolName || '',
         },
@@ -229,8 +278,14 @@ export function buildQwenMessages(messages: any[], body: any, availableTokens: n
     type: string;
     tool: string;
     result: { success: boolean; stdout?: string; stderr?: string; command?: string };
-  }) =>
-    `<tool_result tool="${r.tool}" success="${r.result.success}">\n<command>${escXml(r.result.command || '')}</command>\n<stdout>${escXml(r.result.stdout || '')}</stdout>\n<stderr>${escXml(r.result.stderr || '')}</stderr>\n</tool_result>`;
+  }) => {
+    // Add a header with metadata to help the model recognize what it just received
+    const lines = (r.result.stdout || '').split('\n');
+    const lineCount = lines.length;
+    const isCompressed = lineCount > 50 && (r.result.stdout || '').includes('[lines omitted]');
+    const header = `Tool: ${r.tool} | Lines: ${lineCount}${isCompressed ? ' (compressed — middle lines omitted)' : ''}`;
+    return `<tool_result tool="${r.tool}" success="${r.result.success}">\n<command>${escXml(r.result.command || '')}</command>\n<metadata>${escXml(header)}</metadata>\n<stdout>${escXml(r.result.stdout || '')}</stdout>\n<stderr>${escXml(r.result.stderr || '')}</stderr>\n</tool_result>`;
+  };
   const toolResultsContent = toolResultObjects.length > 0 ? toolResultObjects.map(formatToolResult).join('\n\n') : undefined;
   const qwenMessages: QwenMessage[] = [
     {
