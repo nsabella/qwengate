@@ -27,6 +27,10 @@ setInterval(() => {
   readFileTracker.clear();
 }, 5 * 60 * 1000); // Clear every 5 minutes
 
+// Exported for test cleanup — test suites can call readFileTracker.clear()
+// between tests to avoid state leakage from the "already read" detection.
+export { readFileTracker };
+
 /** Pre-compiled regex patterns for user content sanitization */
 const SYSTEM_REMINDER_RE = /<system-reminder\b[^>]*>([\s\S]*?)<\/system-reminder>/gi;
 const TAG_STRIP_RE = /<(?:system|instruction|prompt|rule)\b[^>]*>[\s\S]*?<\/(?:system|instruction|prompt|rule)>/gi;
@@ -198,16 +202,16 @@ export function buildQwenMessages(messages: any[], body: any, availableTokens: n
         }
       }
 
-      const finalContent = readNote ? readNote + truncated : truncated;
       toolResultObjects.push({
         type: 'function',
         tool: toolName || 'unknown',
         result: {
           success: true,
-          stdout: finalContent,
+          stdout: truncated,
           stderr: '',
           command: toolName || '',
         },
+        readNote,
       });
     }
   }
@@ -278,15 +282,17 @@ export function buildQwenMessages(messages: any[], body: any, availableTokens: n
     type: string;
     tool: string;
     result: { success: boolean; stdout?: string; stderr?: string; command?: string };
+    readNote?: string;
   }) => {
     // Add a header with metadata to help the model recognize what it just received
     const lines = (r.result.stdout || '').split('\n');
     const lineCount = lines.length;
-    const isCompressed = lineCount > 50 && (r.result.stdout || '').includes('[lines omitted]');
+    const isCompressed = /\[\d+\s+lines?\s+omitted\]/i.test(r.result.stdout || '');
     const header = `Tool: ${r.tool} | Lines: ${lineCount}${isCompressed ? ' (compressed — middle lines omitted)' : ''}`;
-    return `<tool_result tool="${r.tool}" success="${r.result.success}">\n<command>${escXml(r.result.command || '')}</command>\n<metadata>${escXml(header)}</metadata>\n<stdout>${escXml(r.result.stdout || '')}</stdout>\n<stderr>${escXml(r.result.stderr || '')}</stderr>\n</tool_result>`;
+    const meta = r.readNote ? `${escXml(header)}\n${escXml(r.readNote)}` : escXml(header);
+    return `<tool_result tool="${r.tool}" success="${r.result.success}">\n<command>${escXml(r.result.command || '')}</command>\n<metadata>${meta}</metadata>\n<stdout>${escXml(r.result.stdout || '')}</stdout>\n<stderr>${escXml(r.result.stderr || '')}</stderr>\n</tool_result>`;
   };
-  const toolResultsContent = toolResultObjects.length > 0 ? toolResultObjects.map(formatToolResult).join('\n\n') : undefined;
+  const toolResultsContent = toolResultObjects.length > 0 ? toolResultObjects.map((r) => formatToolResult(r)).join('\n\n') : undefined;
   const qwenMessages: QwenMessage[] = [
     {
       fid,
