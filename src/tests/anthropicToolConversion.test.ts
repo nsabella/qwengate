@@ -1,35 +1,49 @@
 // Test suite for Qwen-to-Anthropic tool call conversion
 // Tests both streaming and non-streaming paths
+//
+// The parameter normalization suites below import the real implementation
+// (src/routes/anthropicToolParams.ts) — the same code used by both response
+// paths in anthropic.ts. Claude Code tool schemas are snake_case
+// (file_path, old_string, new_string); Qwen tends to emit camelCase.
 
-import { describe, expect, mock, test } from 'bun:test';
-
-// ── Mocks ────────────────────────────────────────────────────────────
-
-const logStore = {
-  log: mock(() => {}),
-  addRawChunk: mock(() => {}),
-  updateEntry: mock(() => {}),
-  createEntry: mock(() => {}),
-  finalizeRequest: mock(() => {}),
-  addError: mock(() => {}),
-};
+import { beforeAll, describe, expect, test } from 'bun:test';
 
 // ── Test helpers ─────────────────────────────────────────────────────
 
-function simulateSseEvents(events: any[]): string[] {
-  const lines: string[] = [];
-  for (const evt of events) {
-    for (const chunk of evt) {
-      lines.push(`data: ${JSON.stringify(chunk)}`);
-    }
-  }
-  return lines;
-}
-
-function parseXmlToolCallsFromText(text: string): { toolCalls: any[]; cleanedText: string } {
-  // Import from actual source
-  return { toolCalls: [], cleanedText: text };
-}
+// Real Claude Code tool schemas as they arrive in /v1/messages requests
+const CLAUDE_CODE_TOOLS = [
+  {
+    name: 'Read',
+    description: 'Reads a file from the local filesystem',
+    input_schema: {
+      type: 'object',
+      properties: { file_path: { type: 'string' }, offset: { type: 'number' }, limit: { type: 'number' } },
+      required: ['file_path'],
+    },
+  },
+  {
+    name: 'Edit',
+    description: 'Performs exact string replacement in a file',
+    input_schema: {
+      type: 'object',
+      properties: {
+        file_path: { type: 'string' },
+        old_string: { type: 'string' },
+        new_string: { type: 'string' },
+      },
+      required: ['file_path', 'old_string', 'new_string'],
+    },
+  },
+  {
+    name: 'Write',
+    description: 'Writes a file to the local filesystem',
+    input_schema: {
+      type: 'object',
+      properties: { file_path: { type: 'string' }, content: { type: 'string' } },
+      required: ['file_path', 'content'],
+    },
+  },
+];
 
 // ── Local MCP extraction test ────────────────────────────────────────
 
@@ -211,252 +225,24 @@ describe('parseXmlToolCalls', () => {
   });
 });
 
-// ── convertOpenAIResponseToAnthropic test ────────────────────────────
-
-describe('convertOpenAIResponseToAnthropic', () => {
-  async function getConverter() {
-    const mod = await import('../routes/anthropic.ts');
-    // The function is not exported, so we replicate its logic here
-    return null;
-  }
-
-  // Test the conversion logic directly
-  test('converts tool calls with params to Anthropic format', () => {
-    const openAIResp = {
-      choices: [
-        {
-          message: {
-            role: 'assistant',
-            content: null,
-            tool_calls: [
-              {
-                id: 'call_123',
-                type: 'function',
-                function: { name: 'Bash', arguments: '{"command":"ls -la"}' },
-              },
-            ],
-          },
-        },
-      ],
-      usage: { prompt_tokens: 100, completion_tokens: 50 },
-    };
-
-    // Replicate convertOpenAIResponseToAnthropic logic
-    const content: any[] = [];
-    if (openAIResp.choices?.[0]?.message?.content) {
-      content.push({ type: 'text', text: openAIResp.choices[0].message.content });
-    }
-    for (const tc of openAIResp.choices[0].message.tool_calls) {
-      let args: any = {};
-      try {
-        args = JSON.parse(tc.function.arguments);
-      } catch {
-        /* ignore */
-      }
-      if (!args || typeof args !== 'object' || Object.keys(args).length === 0) continue;
-      content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input: args });
-    }
-    if (content.length > 1 && content.some((c: any) => c.type === 'tool_use')) {
-      const toolBlocks = content.filter((c: any) => c.type === 'tool_use');
-      content.length = 0;
-      content.push(...toolBlocks);
-    }
-
-    expect(content.length).toBe(1);
-    expect(content[0].type).toBe('tool_use');
-    expect(content[0].name).toBe('Bash');
-    expect(content[0].input).toEqual({ command: 'ls -la' });
-  });
-
-  test('filters empty tool calls in non-streaming path', () => {
-    const openAIResp = {
-      choices: [
-        {
-          message: {
-            role: 'assistant',
-            content: null,
-            tool_calls: [
-              { id: 'call_1', type: 'function', function: { name: 'Bash', arguments: '{}' } },
-              { id: 'call_2', type: 'function', function: { name: 'Read', arguments: '{"file_path":"/tmp/test.txt"}' } },
-              { id: 'call_3', type: 'function', function: { name: 'Bash', arguments: '{"command":"ls"}' } },
-            ],
-          },
-        },
-      ],
-    };
-
-    const content: any[] = [];
-    for (const tc of openAIResp.choices[0].message.tool_calls) {
-      let args: any = {};
-      try {
-        args = JSON.parse(tc.function.arguments);
-      } catch {
-        /* ignore */
-      }
-      if (!args || typeof args !== 'object' || Object.keys(args).length === 0) continue;
-      content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input: args });
-    }
-
-    expect(content.length).toBe(2); // call_1 filtered out (empty object)
-    expect(content[0].name).toBe('Read');
-    expect(content[1].name).toBe('Bash');
-  });
-
-  test('handles non-JSON arguments gracefully', () => {
-    const openAIResp = {
-      choices: [
-        {
-          message: {
-            role: 'assistant',
-            content: null,
-            tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'Bash', arguments: 'not-json' } }],
-          },
-        },
-      ],
-    };
-
-    const content: any[] = [];
-    for (const tc of openAIResp.choices[0].message.tool_calls) {
-      let args: any = {};
-      try {
-        args = JSON.parse(tc.function.arguments);
-      } catch {
-        /* ignore */
-      }
-      if (!args || typeof args !== 'object' || Object.keys(args).length === 0) continue;
-      content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input: args });
-    }
-
-    // not-json can't be parsed, args stays {} → filtered out
-    expect(content.length).toBe(0);
-  });
-
-  test('stop_reason is end_turn when all tool calls filtered', () => {
-    const openAIResp = {
-      choices: [
-        {
-          finish_reason: 'tool_calls',
-          message: {
-            role: 'assistant',
-            content: null,
-            tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'Bash', arguments: '{}' } }],
-          },
-        },
-      ],
-    };
-
-    const content: any[] = [];
-    for (const tc of openAIResp.choices[0].message.tool_calls) {
-      let args: any = {};
-      try {
-        args = JSON.parse(tc.function.arguments);
-      } catch {
-        /* ignore */
-      }
-      if (!args || typeof args !== 'object' || Object.keys(args).length === 0) continue;
-      content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input: args });
-    }
-
-    const hasToolUse = content.some((c: any) => c.type === 'tool_use');
-    const stopReason = hasToolUse ? 'tool_use' : 'end_turn';
-    expect(stopReason).toBe('end_turn');
-  });
-
-  test('stop_reason is tool_use when valid tool calls remain', () => {
-    const openAIResp = {
-      choices: [
-        {
-          finish_reason: 'tool_calls',
-          message: {
-            role: 'assistant',
-            content: null,
-            tool_calls: [
-              { id: 'call_1', type: 'function', function: { name: 'Bash', arguments: '{"command":"ls"}' } },
-              { id: 'call_2', type: 'function', function: { name: 'Read', arguments: '{}' } },
-            ],
-          },
-        },
-      ],
-    };
-
-    const content: any[] = [];
-    const REQUIRED_PARAMS: Record<string, string[]> = {
-      Bash: ['command'],
-      Read: ['filePath'],
-      Edit: ['filePath', 'oldString', 'newString'],
-    };
-    function mapParamName(paramName: string): string {
-      const SNAKE_TO_CAMEL: Record<string, string> = {
-        file_path: 'filePath',
-        old_string: 'oldString',
-        new_string: 'newString',
-      };
-      return SNAKE_TO_CAMEL[paramName] || paramName;
-    }
-    function isValidToolCall(name: string, args: any): boolean {
-      const required = REQUIRED_PARAMS[name];
-      if (required) {
-        const missing = required.filter((p) => args[p] === undefined || args[p] === null || args[p] === '');
-        if (missing.length > 0) return false;
-      } else if (!args || typeof args !== 'object' || Object.keys(args).length === 0) {
-        return false;
-      }
-      return true;
-    }
-
-    for (const tc of openAIResp.choices[0].message.tool_calls) {
-      let args: any = {};
-      try {
-        args = JSON.parse(tc.function.arguments);
-      } catch {
-        /* ignore */
-      }
-      if (!args || typeof args !== 'object') continue;
-      const mapped: any = {};
-      for (const [k, v] of Object.entries(args)) {
-        mapped[mapParamName(k)] = v;
-      }
-      if (!isValidToolCall(tc.function.name, mapped)) continue;
-      content.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input: mapped });
-    }
-
-    const hasToolUse = content.some((c: any) => c.type === 'tool_use');
-    const stopReason = hasToolUse ? 'tool_use' : 'end_turn';
-    expect(stopReason).toBe('tool_use');
-    expect(content.length).toBe(1); // Only Bash with command, Read filtered
-    expect(content[0].name).toBe('Bash');
-    expect(content[0].input).toEqual({ command: 'ls' });
-  });
-});
-
 // ── Anthropic tools → OpenAI conversion test ─────────────────────────
 
 describe('anthropicToolsToOpenAI', () => {
   test('converts Anthropic tool format to OpenAI format', async () => {
     // Replicate the function
-    const tools = [
-      {
-        name: 'Bash',
-        description: 'Run a shell command',
-        input_schema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
-      },
-      {
-        name: 'Read',
-        description: 'Read a file',
-        input_schema: { type: 'object', properties: { filePath: { type: 'string' } }, required: ['filePath'] },
-      },
-    ];
+    const tools = CLAUDE_CODE_TOOLS;
 
     const converted = tools.map((t: any) => ({
       type: 'function',
       function: { name: t.name, description: t.description || '', parameters: t.input_schema || { type: 'object', properties: {} } },
     }));
 
-    expect(converted.length).toBe(2);
+    expect(converted.length).toBe(3);
     expect(converted[0].type).toBe('function');
-    expect(converted[0].function.name).toBe('Bash');
-    expect(converted[0].function.parameters.required).toEqual(['command']);
-    expect(converted[1].function.parameters.required).toEqual(['filePath']);
+    expect(converted[0].function.name).toBe('Read');
+    // Claude Code schemas keep their snake_case param names end-to-end
+    expect(converted[0].function.parameters.required).toEqual(['file_path']);
+    expect(converted[1].function.parameters.required).toEqual(['file_path', 'old_string', 'new_string']);
   });
 
   test('returns empty array for no tools', async () => {
@@ -465,334 +251,202 @@ describe('anthropicToolsToOpenAI', () => {
   });
 });
 
-// ── Full streaming pipeline test ─────────────────────────────────────
+// ── Tool parameter normalization (schema-driven) ─────────────────────
 
-describe('Anthropic streaming tool call pipeline', () => {
-  test('merges XML and local_mcp tool calls without duplicate IDs', async () => {
-    const { extractLocalMcpToolCalls } = await import('../routes/chatStreamingHelpers.ts');
-
-    // Simulate what handleAnthropicStream does at the end:
-    // 1. Parse XML from lastFullContent
-    // 2. Accumulate local_mcp tool calls
-    // 3. Merge deduped
-
-    const xmlToolCalls: any[] = [{ id: 'call_xml1', name: 'Bash', arguments: { command: 'ls' } }];
-
-    const localMcpCalls: any[] = [
-      { id: 'call_mcp1', name: 'Bash', arguments: { command: 'ls' } }, // same tool, different ID
-      { id: 'call_mcp2', name: 'Read', arguments: { file_path: '/tmp/x' } },
-    ];
-
-    const allToolCalls: any[] = [...xmlToolCalls];
-    for (const ltc of localMcpCalls) {
-      if (!allToolCalls.some((e: any) => e.id === ltc.id)) allToolCalls.push(ltc);
-    }
-
-    // No dedup by name — only by ID
-    expect(allToolCalls.length).toBe(3);
-
-    // Filter empty tool calls
-    const validToolCalls = allToolCalls.filter((tc) => {
-      try {
-        const args = typeof tc.arguments === 'string' ? JSON.parse(tc.arguments) : tc.arguments;
-        return args && typeof args === 'object' && Object.keys(args).length > 0;
-      } catch {
-        return false;
-      }
-    });
-
-    // Both Bash calls have 'command', Read has 'file_path' → all valid
-    expect(validToolCalls.length).toBe(3);
+describe('normalizeToolArgNames', () => {
+  let P: typeof import('../routes/anthropicToolParams.ts');
+  beforeAll(async () => {
+    P = await import('../routes/anthropicToolParams.ts');
   });
 
-  test('filters tool calls with empty arguments in merged result', async () => {
-    const xmlToolCalls = [
-      { id: 'call_x1', name: 'Bash', arguments: {} }, // empty
-    ];
-
-    const localMcpCalls = [
-      { id: 'call_m1', name: 'Bash', arguments: { command: 'ls' } },
-      { id: 'call_m2', name: 'Read', arguments: {} }, // empty
-    ];
-
-    const allToolCalls = [...xmlToolCalls];
-    for (const ltc of localMcpCalls) {
-      if (!allToolCalls.some((e) => e.id === ltc.id)) allToolCalls.push(ltc);
-    }
-
-    expect(allToolCalls.length).toBe(3);
-
-    const validToolCalls = allToolCalls.filter((tc) => {
-      try {
-        const args = typeof tc.arguments === 'string' ? JSON.parse(tc.arguments) : tc.arguments;
-        return args && typeof args === 'object' && Object.keys(args).length > 0;
-      } catch {
-        return false;
-      }
-    });
-
-    // Only local_mcp Bash has params
-    expect(validToolCalls.length).toBe(1);
-    expect(validToolCalls[0].name).toBe('Bash');
-    expect(validToolCalls[0].arguments).toEqual({ command: 'ls' });
+  test('regression: Qwen camelCase filePath is renamed toward schema file_path', () => {
+    const index = P.buildToolSchemaIndex(CLAUDE_CODE_TOOLS);
+    const args = P.normalizeToolArgNames('Read', { filePath: '/tmp/x.md' }, index);
+    expect(args).toEqual({ file_path: '/tmp/x.md' });
   });
 
-  test('handles arguments as string (JSON) in filter', async () => {
-    const toolCalls = [
-      { id: 'call_1', name: 'Bash', arguments: '{"command":"ls"}' },
-      { id: 'call_2', name: 'Bash', arguments: '{}' },
-      { id: 'call_3', name: 'Read', arguments: '{"file_path":"/tmp/test.txt"}' },
-    ];
-
-    const valid = toolCalls.filter((tc) => {
-      let args: any = {};
-      try {
-        args = typeof tc.arguments === 'string' ? JSON.parse(tc.arguments) : tc.arguments;
-      } catch {
-        /* ignore */
-      }
-      return args && typeof args === 'object' && Object.keys(args).length > 0;
-    });
-
-    expect(valid.length).toBe(2);
+  test('regression: Edit camelCase trio renamed toward schema snake_case', () => {
+    const index = P.buildToolSchemaIndex(CLAUDE_CODE_TOOLS);
+    const args = P.normalizeToolArgNames('Edit', { filePath: '/tmp/x', oldString: 'a', newString: 'b' }, index);
+    expect(args).toEqual({ file_path: '/tmp/x', old_string: 'a', new_string: 'b' });
   });
-});
 
-// ── Parameter name mapping test ──────────────────────────────────────
+  test('already-correct snake_case passes through untouched', () => {
+    const index = P.buildToolSchemaIndex(CLAUDE_CODE_TOOLS);
+    const args = P.normalizeToolArgNames('Read', { file_path: '/tmp/x.md', offset: 5 }, index);
+    expect(args).toEqual({ file_path: '/tmp/x.md', offset: 5 });
+  });
 
-describe('Tool parameter name mapping', () => {
-  test('Claude Code tools use camelCase params, Qwen may use snake_case', () => {
-    // Claude Code expects: filePath, command, oldString, newString
-    // Qwen may return: file_path, command, old_string, new_string
-
-    const claudeTools = {
-      Read: { input_schema: { properties: { filePath: { type: 'string' } }, required: ['filePath'] } },
-      Bash: { input_schema: { properties: { command: { type: 'string' }, description: { type: 'string' } }, required: ['command'] } },
-      Edit: {
+  test('client with camelCase schema gets camelCase preserved (Qwen snake_case renamed)', () => {
+    const camelTools = [
+      {
+        name: 'Read',
         input_schema: {
-          properties: { filePath: { type: 'string' }, oldString: { type: 'string' }, newString: { type: 'string' } },
-          required: ['filePath', 'oldString', 'newString'],
+          type: 'object',
+          properties: { filePath: { type: 'string' } },
+          required: ['filePath'],
         },
       },
-    };
+    ];
+    const index = P.buildToolSchemaIndex(camelTools);
+    const args = P.normalizeToolArgNames('Read', { file_path: '/tmp/x' }, index);
+    expect(args).toEqual({ filePath: '/tmp/x' });
+  });
 
-    function validateToolCallParams(toolName: string, input: any): { valid: boolean; missing: string[] } {
-      const tool = (claudeTools as any)[toolName];
-      if (!tool) return { valid: false, missing: [toolName] };
-      const required: string[] = tool.input_schema.required || [];
-      const missing = required.filter((p: string) => {
-        // Check both camelCase (Claude) and snake_case (Qwen)
-        const snakeCase = p.replace(/([A-Z])/g, '_$1').toLowerCase();
-        return input[p] === undefined && input[snakeCase] === undefined;
-      });
-      return { valid: missing.length === 0, missing };
-    }
+  test('params unknown to the schema pass through unchanged', () => {
+    const index = P.buildToolSchemaIndex(CLAUDE_CODE_TOOLS);
+    const args = P.normalizeToolArgNames('Read', { file_path: '/x', weird_param: 1 }, index);
+    expect(args).toEqual({ file_path: '/x', weird_param: 1 });
+  });
 
-    // Qwen returns snake_case file_path
-    const input1 = { file_path: '/tmp/x' };
-    const result1 = validateToolCallParams('Read', input1);
-    // filePath is missing but file_path exists → should be valid
-    expect(result1.valid).toBe(true);
+  test('JSON string arguments are parsed before normalization', () => {
+    const index = P.buildToolSchemaIndex(CLAUDE_CODE_TOOLS);
+    const args = P.normalizeToolArgNames('Edit', '{"filePath":"/x","oldString":"a","newString":"b"}', index);
+    expect(args).toEqual({ file_path: '/x', old_string: 'a', new_string: 'b' });
+  });
 
-    // Qwen returns camelCase command
-    const input2 = { command: 'ls' };
-    const result2 = validateToolCallParams('Bash', input2);
-    expect(result2.valid).toBe(true);
+  test('unparseable or non-object arguments yield {}', () => {
+    const index = P.buildToolSchemaIndex(CLAUDE_CODE_TOOLS);
+    expect(P.normalizeToolArgNames('Read', 'not-json', index)).toEqual({});
+    expect(P.normalizeToolArgNames('Read', ['/x'], index)).toEqual({});
+    expect(P.normalizeToolArgNames('Read', null, index)).toEqual({});
+  });
 
-    // Qwen returns snake_case for Edit
-    const input3 = { file_path: '/tmp/x', old_string: 'a', new_string: 'b' };
-    const result3 = validateToolCallParams('Edit', input3);
-    expect(result3.valid).toBe(true);
+  test('lookup tolerates lowercase tool names from Qwen', () => {
+    const index = P.buildToolSchemaIndex(CLAUDE_CODE_TOOLS);
+    const args = P.normalizeToolArgNames('read', { filePath: '/x' }, index);
+    expect(args).toEqual({ file_path: '/x' });
+  });
 
-    // Qwen returns nothing for Bash
-    const input4 = {};
-    const result4 = validateToolCallParams('Bash', input4);
-    expect(result4.valid).toBe(false);
-    expect(result4.missing).toContain('command');
+  test('no schema at all: known Claude Code camelCase params still renamed via fallback', () => {
+    const index = P.buildToolSchemaIndex([]);
+    const args = P.normalizeToolArgNames('Read', { filePath: '/x' }, index);
+    expect(args).toEqual({ file_path: '/x' });
+  });
+
+  test('no schema at all: unrelated keys pass through untouched', () => {
+    const index = P.buildToolSchemaIndex([]);
+    const args = P.normalizeToolArgNames('Grep', { pattern: 'foo', path: '/x' }, index);
+    expect(args).toEqual({ pattern: 'foo', path: '/x' });
   });
 });
 
 // ── Tool call required-param validation tests ─────────────────────
 
-describe('Tool call validation', () => {
-  const REQUIRED_PARAMS: Record<string, string[]> = {
-    Bash: ['command'],
-    Read: ['filePath'],
-    Edit: ['filePath', 'oldString', 'newString'],
-  };
-
-  function isValidToolCall(name: string, args: any): boolean {
-    const required = REQUIRED_PARAMS[name];
-    if (required) {
-      const missing = required.filter((p) => args[p] === undefined || args[p] === null || args[p] === '');
-      if (missing.length > 0) return false;
-    } else if (!args || typeof args !== 'object' || Object.keys(args).length === 0) {
-      return false;
-    }
-    return true;
-  }
-
-  test('Bash requires command', () => {
-    expect(isValidToolCall('Bash', { command: 'ls' })).toBe(true);
-    expect(isValidToolCall('Bash', {})).toBe(false);
-    expect(isValidToolCall('Bash', { description: 'List files' })).toBe(false);
-    expect(isValidToolCall('Bash', { command: '' })).toBe(false);
-    expect(isValidToolCall('Bash', { command: null })).toBe(false);
+describe('requiredParamsFor and isValidToolCall', () => {
+  let P: typeof import('../routes/anthropicToolParams.ts');
+  beforeAll(async () => {
+    P = await import('../routes/anthropicToolParams.ts');
   });
 
-  test('Read requires filePath', () => {
-    expect(isValidToolCall('Read', { filePath: '/tmp/x' })).toBe(true);
-    expect(isValidToolCall('Read', { file_path: '/tmp/x' })).toBe(false);
+  test('schema-required wins over fallback table', () => {
+    const index = P.buildToolSchemaIndex(CLAUDE_CODE_TOOLS);
+    expect(P.requiredParamsFor('Read', index)).toEqual(['file_path']);
+    expect(P.requiredParamsFor('Edit', index)).toEqual(['file_path', 'old_string', 'new_string']);
   });
 
-  test('Edit requires filePath, oldString, newString', () => {
-    expect(isValidToolCall('Edit', { filePath: '/tmp/x', oldString: 'a', newString: 'b' })).toBe(true);
-    expect(isValidToolCall('Edit', { filePath: '/tmp/x' })).toBe(false);
-    expect(isValidToolCall('Edit', { filePath: '/tmp/x', oldString: 'a' })).toBe(false);
+  test('fallback table matches real Claude Code schemas (snake_case)', () => {
+    const index = P.buildToolSchemaIndex([]);
+    expect(P.requiredParamsFor('Bash', index)).toEqual(['command']);
+    expect(P.requiredParamsFor('Read', index)).toEqual(['file_path']);
+    expect(P.requiredParamsFor('Write', index)).toEqual(['file_path', 'content']);
   });
 
-  test('unknown tool passes with any params', () => {
-    expect(isValidToolCall('Unknown', { param1: 'val' })).toBe(true);
-    expect(isValidToolCall('Unknown', {})).toBe(false);
+  test('unknown tool has no required params', () => {
+    const index = P.buildToolSchemaIndex([]);
+    expect(P.requiredParamsFor('TotallyCustom', index)).toBeNull();
+  });
+
+  test('Bash requires command (fallback)', () => {
+    expect(P.isValidToolCall('Bash', { command: 'ls' })).toBe(true);
+    expect(P.isValidToolCall('Bash', {})).toBe(false);
+    expect(P.isValidToolCall('Bash', { description: 'List files' })).toBe(false);
+    expect(P.isValidToolCall('Bash', { command: '' })).toBe(false);
+    expect(P.isValidToolCall('Bash', { command: null })).toBe(false);
+  });
+
+  test('regression: Read with snake_case file_path is valid', () => {
+    // This is exactly what Claude Code sends and expects back
+    expect(P.isValidToolCall('Read', { file_path: '/tmp/x' })).toBe(true);
+    expect(P.isValidToolCall('Read', {})).toBe(false);
+  });
+
+  test('regression: Edit with snake_case trio is valid', () => {
+    expect(P.isValidToolCall('Edit', { file_path: '/tmp/x', old_string: 'a', new_string: 'b' })).toBe(true);
+    expect(P.isValidToolCall('Edit', { file_path: '/tmp/x' })).toBe(false);
+    expect(P.isValidToolCall('Edit', { file_path: '/tmp/x', old_string: 'a' })).toBe(false);
+  });
+
+  test('unknown tool passes with any params but not with none', () => {
+    expect(P.isValidToolCall('Unknown', { param1: 'val' })).toBe(true);
+    expect(P.isValidToolCall('Unknown', {})).toBe(false);
+  });
+
+  test('non-object args are invalid', () => {
+    expect(P.isValidToolCall('Read', null)).toBe(false);
+    expect(P.isValidToolCall('Read', ['/x'])).toBe(false);
+  });
+
+  test('missingRequiredParams reports which params are absent', () => {
+    expect(P.missingRequiredParams(['file_path', 'content'], { file_path: '/x' })).toEqual(['content']);
+    expect(P.missingRequiredParams(['file_path'], { file_path: '' })).toEqual(['file_path']);
+    expect(P.missingRequiredParams(['command'], { command: 'ls' })).toEqual([]);
   });
 });
 
-describe('snake_case to camelCase mapping', () => {
-  function mapParamName(paramName: string): string {
-    const SNAKE_TO_CAMEL: Record<string, string> = {
-      file_path: 'filePath',
-      old_string: 'oldString',
-      new_string: 'newString',
-    };
-    return SNAKE_TO_CAMEL[paramName] || paramName;
-  }
-
-  function mapArgs(args: any): any {
-    const mapped: any = {};
-    for (const [k, v] of Object.entries(args)) {
-      mapped[mapParamName(k)] = v;
-    }
-    return mapped;
-  }
-
-  const REQUIRED_PARAMS: Record<string, string[]> = {
-    Bash: ['command'],
-    Read: ['filePath'],
-    Edit: ['filePath', 'oldString', 'newString'],
-  };
-
-  function isValidToolCall(name: string, args: any): boolean {
-    const required = REQUIRED_PARAMS[name];
-    if (required) {
-      const missing = required.filter((p) => args[p] === undefined || args[p] === null || args[p] === '');
-      if (missing.length > 0) return false;
-    } else if (!args || typeof args !== 'object' || Object.keys(args).length === 0) {
-      return false;
-    }
-    return true;
-  }
-
-  test('Read with file_path passes after mapping', () => {
-    const raw = { file_path: '/tmp/x' };
-    const mapped = mapArgs(raw);
-    expect(isValidToolCall('Read', mapped)).toBe(true);
-    expect(mapped.filePath).toBe('/tmp/x');
+describe('normalizeToolName', () => {
+  let P: typeof import('../routes/anthropicToolParams.ts');
+  beforeAll(async () => {
+    P = await import('../routes/anthropicToolParams.ts');
   });
 
-  test('Edit with snake_case params passes after mapping', () => {
-    const raw = { file_path: '/tmp/x', old_string: 'a', new_string: 'b' };
-    const mapped = mapArgs(raw);
-    expect(isValidToolCall('Edit', mapped)).toBe(true);
-    expect(mapped.filePath).toBe('/tmp/x');
-    expect(mapped.oldString).toBe('a');
-    expect(mapped.newString).toBe('b');
+  test('normalizes Qwen casing to Claude Code conventions', () => {
+    expect(P.normalizeToolName('bash')).toBe('Bash');
+    expect(P.normalizeToolName('read')).toBe('Read');
+    expect(P.normalizeToolName('edit')).toBe('Edit');
+    expect(P.normalizeToolName('write')).toBe('Write');
+    expect(P.normalizeToolName('websearch')).toBe('WebSearch');
+    expect(P.normalizeToolName('web_search')).toBe('WebSearch');
   });
 
-  test('Bash command unchanged by mapping', () => {
-    const raw = { command: 'ls -la' };
-    const mapped = mapArgs(raw);
-    expect(mapped.command).toBe('ls -la');
-  });
-
-  test('non-Claude params pass through unchanged', () => {
-    const raw = { custom_param: 'val' };
-    const mapped = mapArgs(raw);
-    expect(mapped.custom_param).toBe('val');
+  test('leaves already-correct and unknown names alone', () => {
+    expect(P.normalizeToolName('Read')).toBe('Read');
+    expect(P.normalizeToolName('Grep')).toBe('Grep');
+    expect(P.normalizeToolName('mcp__server__tool')).toBe('mcp__server__tool');
   });
 });
 
 // ── Full local_mcp pipeline test ──────────────────────────────────────
-// End-to-end: mock Qwen SSE → extractLocalMcpToolCalls → validateToolCall
-// → normalizeToolName → emit as Anthropic tool_use content blocks
+// End-to-end: mock Qwen SSE → extractLocalMcpToolCalls → normalize/validate
+// → emit as Anthropic tool_use content blocks for Claude Code
 
 describe('local_mcp pipeline to Claude Code', () => {
-  // Replicate REQUIRED_PARAMS + helpers from handleAnthropicStream
-  const REQUIRED_PARAMS: Record<string, string[]> = {
-    Bash: ['command'],
-    Read: ['filePath'],
-    Edit: ['filePath', 'oldString', 'newString'],
-    Write: ['filePath', 'content'],
-  };
+  let P: typeof import('../routes/anthropicToolParams.ts');
+  beforeAll(async () => {
+    P = await import('../routes/anthropicToolParams.ts');
+  });
 
-  function mapParamName(toolName: string, paramName: string): string {
-    const SNAKE_TO_CAMEL: Record<string, string> = {
-      file_path: 'filePath',
-      old_string: 'oldString',
-      new_string: 'newString',
-      tool_call_id: 'toolCallId',
+  // Mirrors validateToolCall in handleAnthropicStream (anthropic.ts)
+  function makeValidator(tools?: any[]) {
+    const index = P.buildToolSchemaIndex(tools);
+    return (tc: { id?: string; name: string; arguments: any }) => {
+      const toolName = P.normalizeToolName(tc.name);
+      const args = P.normalizeToolArgNames(toolName, tc.arguments, index);
+      const required = P.requiredParamsFor(toolName, index);
+      return { toolName, args, valid: P.isValidToolCall(toolName, args, required) };
     };
-    return SNAKE_TO_CAMEL[paramName] || paramName;
   }
 
-  function normalizeToolName(name: string): string {
-    const CASE_MAP: Record<string, string> = {
-      bash: 'Bash',
-      read: 'Read',
-      edit: 'Edit',
-      write: 'Write',
-      websearch: 'WebSearch',
-      web_search: 'WebSearch',
-    };
-    return CASE_MAP[name] || name;
-  }
-
-  function validateToolCall(tc: { name: string; arguments: any }): { valid: boolean; fixedArgs: any } {
-    let args: any = {};
-    try {
-      args = typeof tc.arguments === 'string' ? JSON.parse(tc.arguments) : tc.arguments;
-    } catch {
-      /* ignore */
-    }
-    if (!args || typeof args !== 'object') return { valid: false, fixedArgs: {} };
-
-    const mapped: any = {};
-    for (const [k, v] of Object.entries(args)) {
-      mapped[mapParamName(tc.name, k)] = v;
-    }
-    args = mapped;
-
-    const toolName = normalizeToolName(tc.name);
-    const required = REQUIRED_PARAMS[toolName];
-    if (required) {
-      const missing = required.filter((p) => args[p] === undefined || args[p] === null || args[p] === '');
-      if (missing.length > 0) return { valid: false, fixedArgs: args };
-    } else if (Object.keys(args).length === 0) {
-      return { valid: false, fixedArgs: {} };
-    }
-    return { valid: true, fixedArgs: args };
-  }
-
-  function emitToolUseBlock(tc: { id: string; name: string }, args: any): any {
+  function emitToolUseBlock(id: string, name: string, args: any): any {
     return {
       type: 'content_block_start',
-      content_block: { type: 'tool_use', id: tc.id, name: tc.name, input: args },
+      content_block: { type: 'tool_use', id, name, input: args },
     };
   }
 
-  test('local_mcp Bash with camelCase command reaches Claude Code correctly', async () => {
+  test('local_mcp Bash reaches Claude Code correctly', async () => {
     const { extractLocalMcpToolCalls } = await import('../routes/chatStreamingHelpers.ts');
 
-    // Mock Qwen SSE chunk with local_mcp Bash tool call
     const sseChunk = {
       choices: [
         {
@@ -811,38 +465,23 @@ describe('local_mcp pipeline to Claude Code', () => {
       ],
     };
 
-    // Step 1: Extract from SSE (same as line 623-627 in anthropic.ts)
     const calls = extractLocalMcpToolCalls(sseChunk);
     expect(calls.length).toBe(1);
-    expect(calls[0].name).toBe('Bash');
-    expect(calls[0].arguments).toEqual({ command: 'ls -la /tmp' });
 
-    // Step 2: Validate + normalize (same as lines 812-818 in anthropic.ts)
-    const validToolCalls: any[] = [];
-    const validArgs: any[] = [];
-    for (const tc of calls) {
-      const result = validateToolCall(tc);
-      if (result.valid) {
-        validToolCalls.push({ ...tc, name: normalizeToolName(tc.name) });
-        validArgs.push(result.fixedArgs);
-      }
-    }
+    const validate = makeValidator(CLAUDE_CODE_TOOLS);
+    const result = validate(calls[0]);
+    expect(result.valid).toBe(true);
+    expect(result.toolName).toBe('Bash');
+    expect(result.args).toEqual({ command: 'ls -la /tmp' });
 
-    expect(validToolCalls.length).toBe(1);
-
-    // Step 3: Emit tool_use block (same as lines 837-846 in anthropic.ts)
-    const tc = validToolCalls[0];
-    const args = validArgs[0];
-    const block = emitToolUseBlock(tc, args);
-
-    // This is what Claude Code receives
+    const block = emitToolUseBlock(calls[0].id, result.toolName, result.args);
     expect(block.content_block.type).toBe('tool_use');
     expect(block.content_block.name).toBe('Bash');
     expect(block.content_block.input).toEqual({ command: 'ls -la /tmp' });
     expect(block.content_block.id).toStartWith('call_');
   });
 
-  test('local_mcp Bash with snake_case file_path is mapped to filePath', async () => {
+  test('regression: Read with snake_case file_path stays snake_case and is valid', async () => {
     const { extractLocalMcpToolCalls } = await import('../routes/chatStreamingHelpers.ts');
 
     const sseChunk = {
@@ -860,28 +499,31 @@ describe('local_mcp pipeline to Claude Code', () => {
     };
 
     const calls = extractLocalMcpToolCalls(sseChunk);
-    expect(calls.length).toBe(1);
-    expect(calls[0].name).toBe('Read');
-    expect(calls[0].arguments).toEqual({ file_path: '/tmp/test.txt' });
+    const validate = makeValidator(CLAUDE_CODE_TOOLS);
+    const result = validate(calls[0]);
 
-    // Validate — snake_case → camelCase mapping should make this valid
-    const validToolCalls: any[] = [];
-    const validArgs: any[] = [];
-    for (const tc of calls) {
-      const result = validateToolCall(tc);
-      if (result.valid) {
-        validToolCalls.push({ ...tc, name: normalizeToolName(tc.name) });
-        validArgs.push(result.fixedArgs);
-      }
-    }
-
-    expect(validToolCalls.length).toBe(1);
-    const block = emitToolUseBlock(validToolCalls[0], validArgs[0]);
+    expect(result.valid).toBe(true);
+    const block = emitToolUseBlock(calls[0].id, result.toolName, result.args);
     expect(block.content_block.name).toBe('Read');
-    expect(block.content_block.input).toEqual({ filePath: '/tmp/test.txt' });
+    // Claude Code requires file_path — renaming it would break every call
+    expect(block.content_block.input).toEqual({ file_path: '/tmp/test.txt' });
   });
 
-  test('local_mcp with Write tool (filePath + content) passes validation', async () => {
+  test('regression: Read with Qwen-style camelCase filePath is normalized to file_path', async () => {
+    // Reproduces the reported failure: Qwen emitted {"filePath": "..."} and
+    // Claude Code rejected it ("required parameter file_path is missing")
+    const validate = makeValidator(CLAUDE_CODE_TOOLS);
+    const result = validate({
+      name: 'read',
+      arguments: { filePath: 'C:\\Users\\Nick\\.claude\\projects\\proj\\memory\\MEMORY.md' },
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.toolName).toBe('Read');
+    expect(result.args).toEqual({ file_path: 'C:\\Users\\Nick\\.claude\\projects\\proj\\memory\\MEMORY.md' });
+  });
+
+  test('Write passes validation and keeps snake_case file_path', async () => {
     const { extractLocalMcpToolCalls } = await import('../routes/chatStreamingHelpers.ts');
 
     const sseChunk = {
@@ -904,23 +546,16 @@ describe('local_mcp pipeline to Claude Code', () => {
     };
 
     const calls = extractLocalMcpToolCalls(sseChunk);
-    const validToolCalls: any[] = [];
-    const validArgs: any[] = [];
-    for (const tc of calls) {
-      const result = validateToolCall(tc);
-      if (result.valid) {
-        validToolCalls.push({ ...tc, name: normalizeToolName(tc.name) });
-        validArgs.push(result.fixedArgs);
-      }
-    }
+    const validate = makeValidator(CLAUDE_CODE_TOOLS);
+    const result = validate(calls[0]);
 
-    expect(validToolCalls.length).toBe(1);
-    const block = emitToolUseBlock(validToolCalls[0], validArgs[0]);
+    expect(result.valid).toBe(true);
+    const block = emitToolUseBlock(calls[0].id, result.toolName, result.args);
     expect(block.content_block.name).toBe('Write');
-    expect(block.content_block.input).toEqual({ filePath: '/tmp/output.txt', content: 'hello world' });
+    expect(block.content_block.input).toEqual({ file_path: '/tmp/output.txt', content: 'hello world' });
   });
 
-  test('local_mcp with lowercase tool name is normalized to PascalCase', async () => {
+  test('lowercase tool name is normalized to PascalCase', async () => {
     const { extractLocalMcpToolCalls } = await import('../routes/chatStreamingHelpers.ts');
 
     const sseChunk = {
@@ -941,23 +576,16 @@ describe('local_mcp pipeline to Claude Code', () => {
     // extractLocalMcpToolCalls strips ★- prefix but doesn't normalize case
     expect(calls[0].name).toBe('bash');
 
-    const validToolCalls: any[] = [];
-    const validArgs: any[] = [];
-    for (const tc of calls) {
-      const result = validateToolCall(tc);
-      if (result.valid) {
-        validToolCalls.push({ ...tc, name: normalizeToolName(tc.name) });
-        validArgs.push(result.fixedArgs);
-      }
-    }
+    const validate = makeValidator(CLAUDE_CODE_TOOLS);
+    const result = validate(calls[0]);
 
-    expect(validToolCalls.length).toBe(1);
-    const block = emitToolUseBlock(validToolCalls[0], validArgs[0]);
+    expect(result.valid).toBe(true);
+    const block = emitToolUseBlock(calls[0].id, result.toolName, result.args);
     expect(block.content_block.name).toBe('Bash'); // normalized
     expect(block.content_block.input).toEqual({ command: 'echo hi' });
   });
 
-  test('local_mcp with missing required param is filtered out (not sent to Claude Code)', async () => {
+  test('missing required param is filtered out (not sent to Claude Code)', async () => {
     const { extractLocalMcpToolCalls } = await import('../routes/chatStreamingHelpers.ts');
 
     // Bash without command
@@ -976,15 +604,10 @@ describe('local_mcp pipeline to Claude Code', () => {
     };
 
     const calls = extractLocalMcpToolCalls(sseChunk);
-    const validToolCalls: any[] = [];
-    for (const tc of calls) {
-      const result = validateToolCall(tc);
-      if (result.valid) {
-        validToolCalls.push({ ...tc, name: normalizeToolName(tc.name) });
-      }
-    }
+    const validate = makeValidator(CLAUDE_CODE_TOOLS);
+    const results = calls.map(validate).filter((r) => r.valid);
 
-    expect(validToolCalls.length).toBe(0); // filtered out
+    expect(results.length).toBe(0); // filtered out
   });
 
   test('full multi-tool local_mcp round trip with dedup by ID', async () => {
@@ -1009,7 +632,7 @@ describe('local_mcp pipeline to Claude Code', () => {
       },
     ];
 
-    // Accumulate tool calls during stream (same as line 623-627)
+    // Accumulate tool calls during stream
     const localToolCallsAccum: any[] = [];
     for (const chunk of chunks) {
       const calls = extractLocalMcpToolCalls(chunk);
@@ -1020,21 +643,15 @@ describe('local_mcp pipeline to Claude Code', () => {
 
     expect(localToolCallsAccum.length).toBe(3);
 
-    // Validate all
-    const validToolCalls: any[] = [];
-    const validArgs: any[] = [];
-    for (const tc of localToolCallsAccum) {
-      const result = validateToolCall(tc);
-      if (result.valid) {
-        validToolCalls.push({ ...tc, name: normalizeToolName(tc.name) });
-        validArgs.push(result.fixedArgs);
-      }
-    }
+    // Validate all against the schemas Claude Code sent
+    const validate = makeValidator(CLAUDE_CODE_TOOLS);
+    const validated = localToolCallsAccum.map((tc) => ({ tc, ...validate(tc) }));
+    const validOnes = validated.filter((v) => v.valid);
 
-    expect(validToolCalls.length).toBe(3);
+    expect(validOnes.length).toBe(3);
 
-    // Emit and verify each tool_use block
-    const blocks = validToolCalls.map((tc, i) => emitToolUseBlock(tc, validArgs[i]));
+    // Emit and verify each tool_use block — param names match client schemas
+    const blocks = validOnes.map((v) => emitToolUseBlock(v.tc.id!, v.toolName, v.args));
     expect(blocks[0].content_block).toEqual({
       type: 'tool_use',
       id: expect.stringMatching(/^call_/),
@@ -1045,13 +662,13 @@ describe('local_mcp pipeline to Claude Code', () => {
       type: 'tool_use',
       id: expect.stringMatching(/^call_/),
       name: 'Read',
-      input: { filePath: '/tmp/x' },
+      input: { file_path: '/tmp/x' },
     });
     expect(blocks[2].content_block).toEqual({
       type: 'tool_use',
       id: expect.stringMatching(/^call_/),
       name: 'Edit',
-      input: { filePath: '/tmp/x', oldString: 'a', newString: 'b' },
+      input: { file_path: '/tmp/x', old_string: 'a', new_string: 'b' },
     });
   });
 
@@ -1065,7 +682,7 @@ describe('local_mcp pipeline to Claude Code', () => {
 <parameter=command>ls -la</parameter>
 </function>`;
 
-    // Step 1: Extract XML from text (same as line 742)
+    // Step 1: Extract XML from text
     const { toolCalls: xmlToolCalls } = parseXmlToolCalls(lastFullContent);
     const xmlParsedCalls = xmlToolCalls.map((tc, i) => xmlToolCallToParsed(tc, i));
     expect(xmlParsedCalls.length).toBe(1);
@@ -1078,34 +695,26 @@ describe('local_mcp pipeline to Claude Code', () => {
     };
     const localMcpCalls = extractLocalMcpToolCalls(sseChunk);
 
-    // Step 3: Merge (same as line 743-747)
+    // Step 3: Merge (dedup by ID only)
     const allToolCalls: any[] = [...xmlParsedCalls];
     for (const ltc of localMcpCalls) {
       if (!allToolCalls.some((e: any) => e.id === ltc.id)) allToolCalls.push(ltc);
     }
-    // Both pass — XML and local_mcp have different IDs
     expect(allToolCalls.length).toBe(2);
 
-    // Step 4: Validate
-    const validToolCalls: any[] = [];
-    const validArgs: any[] = [];
-    for (const tc of allToolCalls) {
-      const result = validateToolCall(tc);
-      if (result.valid) {
-        validToolCalls.push({ ...tc, name: normalizeToolName(tc.name) });
-        validArgs.push(result.fixedArgs);
-      }
-    }
-    expect(validToolCalls.length).toBe(2); // both valid
+    // Step 4: Validate both
+    const validate = makeValidator(CLAUDE_CODE_TOOLS);
+    const validOnes = allToolCalls.map((tc) => ({ tc, ...validate(tc) })).filter((v) => v.valid);
+    expect(validOnes.length).toBe(2);
 
     // Step 5: Emit — both go to Claude Code
-    const blocks = validToolCalls.map((tc, i) => emitToolUseBlock(tc, validArgs[i]));
+    const blocks = validOnes.map((v) => emitToolUseBlock(v.tc.id, v.toolName, v.args));
     expect(blocks.every((b) => b.content_block.name === 'Bash')).toBe(true);
     expect(blocks.every((b) => b.content_block.input.command === 'ls -la')).toBe(true);
   });
 
   test('XML hallucination in text — text content still emitted as text_delta during stream', async () => {
-    const { cleanTextOfXmlArtifacts, parseXmlToolCalls } = await import('../tools/xmlToolParser.ts');
+    const { cleanTextOfXmlArtifacts } = await import('../tools/xmlToolParser.ts');
 
     // Model produces text with XML tool call markup
     const rawText = `I'll list the directory for you.
@@ -1113,11 +722,8 @@ describe('local_mcp pipeline to Claude Code', () => {
 <parameter=command>ls -la /tmp</parameter>
 </function>`;
 
-    // What gets streamed as text_delta to Claude Code (same as line 726-731)
-    // During streaming: cleanTextOfXmlArtifacts strips XML from text
-    // But the text is already emitted BEFORE cleanTextOfXmlArtifacts runs
-
-    // After stream: parseXmlToolCalls extracts the tool call
+    // What gets streamed as text_delta to Claude Code:
+    // cleanTextOfXmlArtifacts strips XML from text
     const { toolCalls, cleanedText } = cleanTextOfXmlArtifacts(rawText);
 
     // XML markup removed from text

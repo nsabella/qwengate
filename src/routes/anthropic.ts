@@ -13,6 +13,14 @@ import { cleanTextOfXmlArtifacts, parseXmlToolCalls, xmlToolCallToParsed } from 
 import type { OpenAIRequest, ParsedToolCall } from '../types/openai.ts';
 import { checkContextWindow, estimateTokens } from '../utils/tokenEstimator.ts';
 import {
+  buildToolSchemaIndex,
+  isValidToolCall,
+  missingRequiredParams,
+  normalizeToolArgNames,
+  normalizeToolName,
+  requiredParamsFor,
+} from './anthropicToolParams.ts';
+import {
   acquireSessionWithCorrections,
   buildQwenMessages,
   createQwenStreamWithRetry,
@@ -155,19 +163,6 @@ function finishReasonToAnthropic(reason: string): string {
   return 'end_turn';
 }
 
-// ponytail: normalize Qwen tool name case to match Claude Code conventions
-function normalizeToolName(name: string): string {
-  const CASE_MAP: Record<string, string> = {
-    bash: 'Bash',
-    read: 'Read',
-    edit: 'Edit',
-    write: 'Write',
-    websearch: 'WebSearch',
-    web_search: 'WebSearch',
-  };
-  return CASE_MAP[name] || name;
-}
-
 // ponytail: simple formatter for Anthropic content blocks in log display
 function formatContent(content: any): string {
   if (typeof content === 'string') return content;
@@ -187,7 +182,7 @@ function formatContent(content: any): string {
     .join('\n');
 }
 
-function convertOpenAIResponseToAnthropic(openAIResp: any, requestModel: string): any {
+function convertOpenAIResponseToAnthropic(openAIResp: any, requestModel: string, tools?: any[]): any {
   const choice = openAIResp.choices?.[0];
   const message = choice?.message || {};
   const content: any[] = [];
@@ -195,58 +190,30 @@ function convertOpenAIResponseToAnthropic(openAIResp: any, requestModel: string)
     content.push({ type: 'text', text: message.content });
   }
 
-  // ponytail: static Claude Code required param map — adapt if tools vary
-  const REQUIRED_PARAMS: Record<string, string[]> = {
-    Bash: ['command'],
-    Read: ['filePath'],
-    Edit: ['filePath', 'oldString', 'newString'],
-    Write: ['filePath', 'content'],
-  };
-
-  function mapParamName(paramName: string): string {
-    const SNAKE_TO_CAMEL: Record<string, string> = {
-      file_path: 'filePath',
-      old_string: 'oldString',
-      new_string: 'newString',
-    };
-    return SNAKE_TO_CAMEL[paramName] || paramName;
-  }
-
-  function isValidToolCall(name: string, args: any): boolean {
-    const required = REQUIRED_PARAMS[name];
-    if (required) {
-      const missing = required.filter((p) => args[p] === undefined || args[p] === null || args[p] === '');
-      if (missing.length > 0) return false;
-    } else if (!args || typeof args !== 'object' || Object.keys(args).length === 0) {
-      return false;
-    }
-    return true;
-  }
+  // Normalize param names toward the schemas the client actually sent
+  const schemaIndex = buildToolSchemaIndex(tools);
 
   if (message.tool_calls) {
     for (const tc of message.tool_calls) {
-      let args: any = {};
+      let parsedArgs: unknown;
       try {
-        args = JSON.parse(tc.function.arguments);
+        parsedArgs = JSON.parse(tc.function.arguments);
       } catch {
         /* ignore */
       }
-      if (!args || typeof args !== 'object') continue;
-      // Map snake_case to camelCase
-      const mapped: any = {};
-      for (const [k, v] of Object.entries(args)) {
-        mapped[mapParamName(k)] = v;
-      }
       const normalizedName = normalizeToolName(tc.function.name);
-      if (!isValidToolCall(normalizedName, mapped)) {
+      const args = normalizeToolArgNames(normalizedName, parsedArgs, schemaIndex);
+      const required = requiredParamsFor(normalizedName, schemaIndex);
+      if (!isValidToolCall(normalizedName, args, required)) {
+        const missing = required ? missingRequiredParams(required, args) : [];
         logStore.log(
           'debug',
           'chat',
-          `[Anthropic] Skipped invalid tool call in non-streaming: ${tc.function?.name} args=${JSON.stringify(mapped)}`,
+          `[Anthropic] Skipped invalid tool call in non-streaming: ${tc.function?.name} missing=${missing.join(', ') || '(none)'} args=${JSON.stringify(args)}`,
         );
         continue;
       }
-      content.push({ type: 'tool_use', id: tc.id, name: normalizedName, input: mapped });
+      content.push({ type: 'tool_use', id: tc.id, name: normalizedName, input: args });
     }
   }
   // Anthropic doesn't send text + tool_use together — prefer tool_use
@@ -548,6 +515,7 @@ async function handleAnthropicStream(
   nextParentId: string | null,
   sessionHeaders: any,
   promptTokenEstimate: number = 0,
+  tools?: any[],
 ): Promise<Response> {
   c.header('Content-Type', 'text/event-stream');
   c.header('Cache-Control', 'no-cache');
@@ -807,58 +775,24 @@ async function handleAnthropicStream(
       }
 
       // Validate and filter tool calls
-      // ponytail: static Claude Code required param map — upgrade if tools vary
-      const REQUIRED_PARAMS: Record<string, string[]> = {
-        Bash: ['command'],
-        Read: ['filePath'],
-        Edit: ['filePath', 'oldString', 'newString'],
-        Write: ['filePath', 'content'],
-      };
-
-      // ponytail: snake_case → camelCase mapping for Qwen param names
-      function mapParamName(toolName: string, paramName: string): string {
-        const SNAKE_TO_CAMEL: Record<string, string> = {
-          file_path: 'filePath',
-          old_string: 'oldString',
-          new_string: 'newString',
-          tool_call_id: 'toolCallId',
-        };
-        return SNAKE_TO_CAMEL[paramName] || paramName;
-      }
+      // Normalize param names toward the schemas the client actually sent —
+      // Qwen tends to emit camelCase (Cline-style) while Claude Code expects
+      // whatever its request schemas declared (snake_case for file tools).
+      const schemaIndex = buildToolSchemaIndex(tools);
 
       function validateToolCall(tc: ParsedToolCall): { valid: boolean; fixedArgs: any } {
-        let args: any = {};
-        try {
-          args = typeof tc.arguments === 'string' ? JSON.parse(tc.arguments) : tc.arguments;
-        } catch {
-          /* ignore */
-        }
-        if (!args || typeof args !== 'object') return { valid: false, fixedArgs: {} };
-
-        // Map snake_case to camelCase
-        const mapped: any = {};
-        for (const [k, v] of Object.entries(args)) {
-          mapped[mapParamName(tc.name, k)] = v;
-        }
-        args = mapped;
-
         const toolName = normalizeToolName(tc.name);
-        const required = REQUIRED_PARAMS[toolName];
-        if (required) {
-          const missing = required.filter((p) => args[p] === undefined || args[p] === null || args[p] === '');
-          if (missing.length > 0) {
-            logStore.log(
-              'debug',
-              'chat',
-              `[Anthropic] Skipped tool call: ${tc.name} missing required params: ${missing.join(', ')} (had: ${JSON.stringify(args)})`,
-            );
-            return { valid: false, fixedArgs: args };
-          }
-        } else if (Object.keys(args).length === 0) {
-          logStore.log('debug', 'chat', `[Anthropic] Skipped tool call: ${tc.name} (no params)`);
-          return { valid: false, fixedArgs: {} };
+        const args = normalizeToolArgNames(toolName, tc.arguments, schemaIndex);
+        const required = requiredParamsFor(toolName, schemaIndex);
+        if (!isValidToolCall(toolName, args, required)) {
+          const missing = required ? missingRequiredParams(required, args) : [];
+          logStore.log(
+            'debug',
+            'chat',
+            `[Anthropic] Skipped tool call: ${tc.name} ${missing.length > 0 ? `missing required params: ${missing.join(', ')}` : '(no params)'} (had: ${JSON.stringify(args)})`,
+          );
+          return { valid: false, fixedArgs: args };
         }
-
         return { valid: true, fixedArgs: args };
       }
 
@@ -1156,7 +1090,7 @@ export async function anthropicMessages(c: Context) {
           <any>openAIResponse.status,
         );
       }
-      const anthropicResp = convertOpenAIResponseToAnthropic(openAIResp, anthropicModel);
+      const anthropicResp = convertOpenAIResponseToAnthropic(openAIResp, anthropicModel, tools);
       logStore.log(
         'debug',
         'chat',
@@ -1179,6 +1113,7 @@ export async function anthropicMessages(c: Context) {
       nextParentId,
       sessionHeaders,
       promptTokenEstimate,
+      tools,
     );
     logStore.log('debug', 'chat', `[Anthropic] Streaming completed latency=${Date.now() - _requestStartTime}ms`);
     cancelWatchdog();
