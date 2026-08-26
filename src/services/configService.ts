@@ -30,6 +30,7 @@ export interface ConfigSchema {
   MODELS_CACHE_TTL_MS: string;
   DARK_MODE: string;
   CLAUDE_CODE_PROXY: string;
+  TOOL_RESULT_MAX_CHARS: string;
 }
 
 export const DEFAULT_CONFIG: ConfigSchema = {
@@ -59,6 +60,7 @@ export const DEFAULT_CONFIG: ConfigSchema = {
   MODELS_CACHE_TTL_MS: '3600000',
   DARK_MODE: 'false',
   CLAUDE_CODE_PROXY: 'false',
+  TOOL_RESULT_MAX_CHARS: '24000',
 };
 
 const CONFIG_KEYS = new Set<string>(Object.keys(DEFAULT_CONFIG));
@@ -141,6 +143,7 @@ export class ConfigService {
     checkPositive('RETRY_MAX_DELAY_MS', 'RETRY_MAX_DELAY_MS');
     checkPositive('AUTH_REFRESH_BEFORE_MS', 'AUTH_REFRESH_BEFORE_MS');
     checkPositive('MAX_TOOL_CALLS_PER_RESPONSE', 'MAX_TOOL_CALLS_PER_RESPONSE');
+    checkPositive('TOOL_RESULT_MAX_CHARS', 'TOOL_RESULT_MAX_CHARS');
   }
 
   get<K extends keyof ConfigSchema>(key: K, defaultValue?: string): string {

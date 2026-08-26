@@ -71,7 +71,8 @@ interface AnthropicMessage {
   content: string | AnthropicContentBlock[];
 }
 
-function anthropicMessagesToOpenAI(messages: AnthropicMessage[], system?: string): any[] {
+// Exported for regression tests (pure conversion logic)
+export function anthropicMessagesToOpenAI(messages: AnthropicMessage[], system?: string): any[] {
   const out: any[] = [];
   if (system) {
     out.push({ role: 'system', content: system });
@@ -111,6 +112,12 @@ function anthropicMessagesToOpenAI(messages: AnthropicMessage[], system?: string
           } else {
             out.push({ role: 'user', content: textParts.join('\n') });
           }
+        } else if (textParts.length > 0) {
+          // ponytail: prose accompanying tool results (interrupt notices,
+          // system reminders, user asides) used to be dropped silently —
+          // forward it as a user message after the tool responses so the
+          // model keeps the full context.
+          out.push({ role: 'user', content: textParts.join('\n') });
         }
       }
     } else if (msg.role === 'assistant') {
@@ -203,15 +210,17 @@ function convertOpenAIResponseToAnthropic(openAIResp: any, requestModel: string,
       }
       const normalizedName = normalizeToolName(tc.function.name);
       const args = normalizeToolArgNames(normalizedName, parsedArgs, schemaIndex);
+      // ponytail: emit even when schema validation fails — silently dropping
+      // calls strands the agent; a client-side validation error gives the
+      // model actionable feedback instead (mirrors the streaming path).
       const required = requiredParamsFor(normalizedName, schemaIndex);
       if (!isValidToolCall(normalizedName, args, required)) {
         const missing = required ? missingRequiredParams(required, args) : [];
         logStore.log(
-          'debug',
+          'warn',
           'chat',
-          `[Anthropic] Skipped invalid tool call in non-streaming: ${tc.function?.name} missing=${missing.join(', ') || '(none)'} args=${JSON.stringify(args)}`,
+          `[Anthropic] Emitting imperfect tool call in non-streaming (${tc.function?.name} → ${normalizedName}) missing=${missing.join(', ') || '(none)'} args=${JSON.stringify(args)} — client will return a validation error`,
         );
-        continue;
       }
       content.push({ type: 'tool_use', id: tc.id, name: normalizedName, input: args });
     }
@@ -274,11 +283,7 @@ async function setupAnthropicSession(
     });
   }
 
-  const {
-    qwenMessages: processedMessages,
-    systemContent,
-    toolResultsContent,
-  } = buildQwenMessages(cleanedMessages, body, availableTokens, toolCalling);
+  const { qwenMessages: processedMessages, systemContent } = buildQwenMessages(cleanedMessages, body, availableTokens, toolCalling);
 
   const MAX_INLINE_CHARS = 50000;
   let inlineContent = processedMessages[0].content as string;
@@ -342,10 +347,12 @@ async function setupAnthropicSession(
       }
     }
 
-    if (accountEmail && (systemContent || toolResultsContent || chatHistoryContent)) {
+    // Upload a single context file: system instructions + older chat history.
+    // (Tool results are inline in the message content since they must stay
+    // adjacent to the assistant turns that produced them.)
+    if (accountEmail && (systemContent || chatHistoryContent)) {
       const parts: string[] = [];
       if (systemContent) parts.push(`<system-instructions>\n${systemContent}\n</system-instructions>`);
-      if (toolResultsContent) parts.push(`<tool-results>\n${toolResultsContent}\n</tool-results>`);
       if (chatHistoryContent) parts.push(`<chat_history>\n${chatHistoryContent}\n</chat_history>`);
       try {
         const file = await uploadLargeTextAsFile(accountEmail, parts.join('\n\n'), 'context.txt');
@@ -774,54 +781,45 @@ async function handleAnthropicStream(
         );
       }
 
-      // Validate and filter tool calls
       // Normalize param names toward the schemas the client actually sent —
       // Qwen tends to emit camelCase (Cline-style) while Claude Code expects
       // whatever its request schemas declared (snake_case for file tools).
       const schemaIndex = buildToolSchemaIndex(tools);
 
-      function validateToolCall(tc: ParsedToolCall): { valid: boolean; fixedArgs: any } {
-        const toolName = normalizeToolName(tc.name);
-        const args = normalizeToolArgNames(toolName, tc.arguments, schemaIndex);
-        const required = requiredParamsFor(toolName, schemaIndex);
-        if (!isValidToolCall(toolName, args, required)) {
+      // ponytail: every parsed call is emitted, even when it fails schema
+      // validation. Silently dropping calls strands the agent — the client
+      // never executes anything and the model never learns why (2026-08-24
+      // cam_tracking session: model gave up on file tools and dumped file
+      // contents into chat text). Emitting lets Claude Code reject the call
+      // with an explicit error tool_result, restoring the feedback loop.
+      const emittedToolCalls: ParsedToolCall[] = [];
+      const emittedArgs: any[] = [];
+      for (const tc of allToolCalls) {
+        const normalizedName = normalizeToolName(tc.name);
+        const args = normalizeToolArgNames(normalizedName, tc.arguments, schemaIndex);
+        const required = requiredParamsFor(normalizedName, schemaIndex);
+        if (!isValidToolCall(normalizedName, args, required)) {
           const missing = required ? missingRequiredParams(required, args) : [];
           logStore.log(
-            'debug',
+            'warn',
             'chat',
-            `[Anthropic] Skipped tool call: ${tc.name} ${missing.length > 0 ? `missing required params: ${missing.join(', ')}` : '(no params)'} (had: ${JSON.stringify(args)})`,
+            `[Anthropic] Emitting imperfect tool call (${tc.name} → ${normalizedName}) missing=${missing.join(', ') || '(none)'} had=${JSON.stringify(args)} — client will return a validation error`,
           );
-          return { valid: false, fixedArgs: args };
-        }
-        return { valid: true, fixedArgs: args };
-      }
-
-      const validToolCalls: ParsedToolCall[] = [];
-      const validArgs: any[] = [];
-      for (const tc of allToolCalls) {
-        const result = validateToolCall(tc);
-        if (result.valid) {
-          const normalizedName = normalizeToolName(tc.name);
-          logStore.log(
-            'debug',
-            'chat',
-            `[Anthropic] VALID tool call: original_name=${tc.name} normalized_name=${normalizedName} id=${tc.id} args=${JSON.stringify(result.fixedArgs)}`,
-          );
-          validToolCalls.push({ ...tc, name: normalizedName });
-          validArgs.push(result.fixedArgs);
         } else {
           logStore.log(
             'debug',
             'chat',
-            `[Anthropic] SKIPPED tool call (invalid): name=${tc.name} id=${tc.id} args=${JSON.stringify(tc.arguments)} reason=missing_required_params`,
+            `[Anthropic] VALID tool call: original_name=${tc.name} normalized_name=${normalizedName} id=${tc.id} args=${JSON.stringify(args)}`,
           );
         }
+        emittedToolCalls.push({ ...tc, name: normalizedName });
+        emittedArgs.push(args);
       }
 
       logStore.log(
         'debug',
         'chat',
-        `[Anthropic] Tool call summary: ${allToolCalls.length} raw → ${validToolCalls.length} valid → emitting ${validToolCalls.length} tool_use blocks`,
+        `[Anthropic] Tool call summary: ${allToolCalls.length} raw → emitting ${emittedToolCalls.length} tool_use blocks`,
       );
       // Close text or thinking block
       if (emittedTextBlock) {
@@ -832,12 +830,12 @@ async function handleAnthropicStream(
         await streamWriter.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`);
       }
 
-      // Emit tool_use content blocks using pre-validated calls
+      // Emit tool_use content blocks
       // ponytail: full args JSON in one delta since we know it upfront (local_mcp/XML)
       let blockIndex = emittedTextBlock ? textBlockIndex + 1 : emittedThinkingBlock ? 1 : 0;
-      for (let i = 0; i < validToolCalls.length; i++) {
-        const tc = validToolCalls[i];
-        const args = validArgs[i];
+      for (let i = 0; i < emittedToolCalls.length; i++) {
+        const tc = emittedToolCalls[i];
+        const args = emittedArgs[i];
         // content_block_start with empty input per spec
         await streamWriter.write(
           `event: content_block_start\ndata: ${JSON.stringify({
@@ -861,7 +859,7 @@ async function handleAnthropicStream(
       }
 
       // Emit message_delta
-      const stopReason = validToolCalls.length > 0 ? 'tool_use' : emittedThinkingBlock && !emittedTextBlock ? 'end_turn' : 'end_turn';
+      const stopReason = emittedToolCalls.length > 0 ? 'tool_use' : emittedThinkingBlock && !emittedTextBlock ? 'end_turn' : 'end_turn';
       await streamWriter.write(
         `event: message_delta\ndata: ${JSON.stringify({
           type: 'message_delta',
@@ -878,13 +876,13 @@ async function handleAnthropicStream(
         entry.reasoningContent = reasoningBuffer || undefined;
         entry.rawFullContent = lastFullContent || reasoningBuffer;
         entry.processedApiOutput = lastFullContent || reasoningBuffer;
-        entry.parsedToolCalls = validToolCalls.map((tc) => ({
+        entry.parsedToolCalls = emittedToolCalls.map((tc) => ({
           name: tc.name,
           args: typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments),
         }));
         entry.finalResponse = {
           finishReason: stopReason,
-          toolCallCount: validToolCalls.length,
+          toolCallCount: emittedToolCalls.length,
           contentPreview: (lastFullContent || reasoningBuffer).substring(0, 500),
         };
       });

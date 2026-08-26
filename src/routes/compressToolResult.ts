@@ -1,3 +1,5 @@
+import { config } from '../services/configService.ts';
+
 /**
  * Smart compression for tool results before they reach the LLM.
  * Prevents echo at the source by compressing structured tool output
@@ -195,19 +197,18 @@ function compressGitPush(content: string, lines: string[], totalLines: number): 
   return compressed.length < content.length * 0.7 ? compressed : null;
 }
 
-function compressLongContent(content: string, lines: string[], totalLines: number, trimmed: string): string | null {
-  if (totalLines <= 50 || trimmed.startsWith('[') || trimmed.startsWith('{')) return null;
-  const first20 = lines.slice(0, 20);
-  const last10 = lines.slice(-10);
-  const omitted = totalLines - 30;
-  const compressed = `${first20.join('\n')}\n... [${omitted} lines omitted] ...\n${last10.join('\n')}`;
-  return compressed.length < content.length * 0.7 ? compressed : null;
-}
-
 /**
  * Smart compression for tool results before they reach the LLM.
- * Prevents echo at the source by compressing structured tool output
- * into a form the model can analyze but cannot verbatim-repeat.
+ * Structured outputs with recognizable formats (git, pytest, npm, docker, JSON
+ * arrays, file listings) are summarized to their salient parts.
+ *
+ * Unstructured content — source files above all — must reach the model
+ * substantially intact: coding agents need exact contents for Edit/Write
+ * workflows, and a head+10-line-tail gutting makes Read/Bash useless while
+ * teaching the model that its tools return garbage (2026-08-24 cam_tracking
+ * session: agent re-read files it had just catted, then abandoned tool use).
+ * So beyond the specialized summarizers we only bound extreme sizes via
+ * TOOL_RESULT_MAX_CHARS (head/tail truncation keeps ~90% up to the cap).
  */
 export function compressToolResult(content: string): string {
   if (!content || content.length < 500) return content;
@@ -216,7 +217,7 @@ export function compressToolResult(content: string): string {
   const totalLines = lines.length;
   const trimmed = content.trim();
 
-  return (
+  const summarized =
     compressGitDiff(content, lines, totalLines) ??
     compressJson(content, trimmed) ??
     compressFileListing(content, lines, totalLines) ??
@@ -226,8 +227,11 @@ export function compressToolResult(content: string): string {
     compressNpm(content, lines, totalLines) ??
     compressGitLog(content, lines, totalLines) ??
     compressGitStatus(content, lines, totalLines) ??
-    compressGitPush(content, lines, totalLines) ??
-    compressLongContent(content, lines, totalLines, trimmed) ??
-    truncateToolResult(content)
-  );
+    compressGitPush(content, lines, totalLines);
+  if (summarized !== null) return summarized;
+
+  // ponytail: no recognized structure — only bound size (<=0 disables the cap)
+  const maxChars = config.getInt('TOOL_RESULT_MAX_CHARS', 24000);
+  if (maxChars > 0 && content.length > maxChars) return truncateToolResult(content, maxChars);
+  return content;
 }

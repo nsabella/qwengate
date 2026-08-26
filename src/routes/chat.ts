@@ -115,11 +115,7 @@ async function setupSession(messages: any[], body: OpenAIRequest, availableToken
     });
   }
 
-  const {
-    qwenMessages: processedMessages,
-    systemContent,
-    toolResultsContent,
-  } = buildQwenMessages(cleanedMessages, body, availableTokens, toolCalling);
+  const { qwenMessages: processedMessages, systemContent } = buildQwenMessages(cleanedMessages, body, availableTokens, toolCalling);
 
   // ── Inline content truncation ─────────────────────────────────
   // Keep the most recent ~50k characters inline; push older history
@@ -191,12 +187,13 @@ async function setupSession(messages: any[], body: OpenAIRequest, availableToken
       }
     }
 
-    // Upload a single context file: system instructions + tool results + older chat history
+    // Upload a single context file: system instructions + older chat history.
+    // (Tool results are inline in the message content since they must stay
+    // adjacent to the assistant turns that produced them.)
     // Merging cuts upload overhead in half (one STS token, one OSS upload, one parse poll)
-    if (accountEmail && (systemContent || toolResultsContent || chatHistoryContent)) {
+    if (accountEmail && (systemContent || chatHistoryContent)) {
       const parts: string[] = [];
       if (systemContent) parts.push(`<system-instructions>\n${systemContent}\n</system-instructions>`);
-      if (toolResultsContent) parts.push(`<tool-results>\n${toolResultsContent}\n</tool-results>`);
       if (chatHistoryContent) parts.push(`<chat_history>\n${chatHistoryContent}\n</chat_history>`);
       const combinedContent = parts.join('\n\n');
       try {

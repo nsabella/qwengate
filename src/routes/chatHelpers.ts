@@ -51,7 +51,20 @@ export interface QwenMessage {
 export interface BuildQwenMessagesResult {
   qwenMessages: QwenMessage[];
   systemContent?: string;
-  toolResultsContent?: string;
+}
+
+// Render a tool result as an XML block placed inline in the conversation flow,
+// immediately after the <assist> segment whose tool call produced it. Keeping
+// call and result adjacent preserves ordering and attribution (results used to
+// be hoisted into a separate uploaded file, decoupling them from their turns).
+function formatToolResult(r: {
+  type: string;
+  tool: string;
+  result: { success: boolean; stdout?: string; stderr?: string; command?: string };
+}): string {
+  return `<tool_result tool="${r.tool}" success="${r.result.success}">\n<command>${escXml(r.result.command || '')}</command>\n<stdout>${escXml(
+    r.result.stdout || '',
+  )}</stdout>\n<stderr>${escXml(r.result.stderr || '')}</stderr>\n</tool_result>`;
 }
 
 // ── Business logic ───────────────────────────────────────────────
@@ -62,7 +75,6 @@ export function buildQwenMessages(messages: any[], body: any, availableTokens: n
 
   const segments: string[] = [];
   const systemParts: string[] = [];
-  const toolResultObjects: any[] = [];
 
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -150,16 +162,18 @@ export function buildQwenMessages(messages: any[], body: any, availableTokens: n
       }
 
       const truncated = compressToolResult(contentStr || '');
-      toolResultObjects.push({
-        type: 'function',
-        tool: toolName || 'unknown',
-        result: {
-          success: true,
-          stdout: truncated,
-          stderr: '',
-          command: toolName || '',
-        },
-      });
+      segments.push(
+        formatToolResult({
+          type: 'function',
+          tool: toolName || 'unknown',
+          result: {
+            success: true,
+            stdout: truncated,
+            stderr: '',
+            command: toolName || '',
+          },
+        }),
+      );
     }
   }
 
@@ -198,13 +212,6 @@ export function buildQwenMessages(messages: any[], body: any, availableTokens: n
   // Single message (Qwen API only accepts 1 message per chat)
   const fid = randomUUID();
   const systemContent = systemParts.length > 0 ? systemParts.join('\n\n') : undefined;
-  const formatToolResult = (r: {
-    type: string;
-    tool: string;
-    result: { success: boolean; stdout?: string; stderr?: string; command?: string };
-  }) =>
-    `<tool_result tool="${r.tool}" success="${r.result.success}">\n<command>${escXml(r.result.command || '')}</command>\n<stdout>${escXml(r.result.stdout || '')}</stdout>\n<stderr>${escXml(r.result.stderr || '')}</stderr>\n</tool_result>`;
-  const toolResultsContent = toolResultObjects.length > 0 ? toolResultObjects.map(formatToolResult).join('\n\n') : undefined;
   const qwenMessages: QwenMessage[] = [
     {
       fid,
@@ -224,7 +231,7 @@ export function buildQwenMessages(messages: any[], body: any, availableTokens: n
     },
   ];
 
-  return { qwenMessages, systemContent, toolResultsContent };
+  return { qwenMessages, systemContent };
 }
 
 export function handleImageModelFallback(body: any, messages: any[]): void {

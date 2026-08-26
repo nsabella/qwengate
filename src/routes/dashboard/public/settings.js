@@ -27,6 +27,7 @@ var SETTINGS_SECTIONS = [
         ],
       },
       { key: 'MAX_TOOL_CALLS_PER_RESPONSE', label: 'MAX_TOOL_CALLS_PER_RESPONSE', type: 'number' },
+      { key: 'TOOL_RESULT_MAX_CHARS', label: 'TOOL_RESULT_MAX_CHARS', type: 'number' },
     ],
   },
   {
