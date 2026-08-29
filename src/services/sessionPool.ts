@@ -185,6 +185,12 @@ export class SessionPool {
   private async createSessionWithHeaders(email: string | undefined, headers: BasicHeaders): Promise<string> {
     const acct = email ? getAccountByEmail(email) : null;
 
+    // ponytail: token-less accounts get sessions pinned to qwen3.5-flash, which
+    // degrades tool calling — make the downgrade loud instead of silent.
+    if (!acct?.state?.token) {
+      logStore.log('warn', 'pool', `[SessionPool] Account ${email || '?'} has no token — creating session pinned to qwen3.5-flash (tool-calling may be degraded)`);
+    }
+
     const sessionBody = JSON.stringify({
       title: 'New Chat',
       models: [acct?.state?.token ? 'qwen3.7-plus' : 'qwen3.5-flash'],

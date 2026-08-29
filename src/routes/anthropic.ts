@@ -46,11 +46,20 @@ const ANTHROPIC_TO_QWEN: Record<string, string> = {
   'claude-3-opus-20240229': 'qwen3.7-max',
   'claude-sonnet-4-6-20250514': 'qwen3.7-max',
   'claude-3-haiku-20240307': 'qwen3.5-flash',
+  // ponytail: forward verbatim (2026-08-27, Nick's choice) — LiteLLM sends this
+  // exact name and it exists on chat.qwen.ai; previously fell through to the
+  // default, so clients asking for qwen3.8-max were silently served qwen3.7-max.
+  'qwen3.8-max': 'qwen3.8-max',
 };
 const DEFAULT_QWEN_MODEL = 'qwen3.7-max';
 
-function mapModel(anthropicModel: string): string {
-  return ANTHROPIC_TO_QWEN[anthropicModel] || DEFAULT_QWEN_MODEL;
+export function mapModel(anthropicModel: string): string {
+  const mapped = ANTHROPIC_TO_QWEN[anthropicModel];
+  if (mapped) return mapped;
+  // ponytail: never remap silently — the JSONL/label a client reports must be
+  // traceable to what actually ran (2026-08-26 incident diagnosis).
+  logStore.log('warn', 'chat', `[Anthropic] Unmapped model alias '${anthropicModel}' — falling back to ${DEFAULT_QWEN_MODEL}`);
+  return DEFAULT_QWEN_MODEL;
 }
 
 // ── Request conversion ─────────────────────────────────────────────
@@ -559,6 +568,9 @@ async function handleAnthropicStream(
       let localToolCallsAccum: any[] = [];
       let hasEmittedContent = false;
       let textBlockIndex = 0;
+      let sawUnknownPhaseWarn = false;
+      // Phases extractDeltaContent understands (text/thinking paths)
+      const KNOWN_DELTA_PHASES = new Set(['thinking_summary', 'think', 'answer', 'local_tool']);
 
       const STREAM_IDLE_TIMEOUT = Math.max(10_000, config.getInt('STREAM_IDLE_TIMEOUT_MS', 60_000));
 
@@ -624,10 +636,28 @@ async function handleAnthropicStream(
               logStore.log('debug', 'chat', `[Anthropic] local_mcp tool: name=${c.name} id=${c.id} args=${JSON.stringify(c.arguments)}`);
               if (!localToolCallsAccum.some((e) => e.id === c.id)) localToolCallsAccum.push(c);
             }
+          } else if (chunk.choices?.[0]?.delta?.extra?.local_mcp) {
+            // ponytail: local_mcp payload arrived under a status/phase the gate
+            // doesn't recognize — surface it instead of silently dropping
+            // (2026-08-26 incident: 6 turns of tool-less responses).
+            logStore.log(
+              'debug',
+              'chat',
+              `[Anthropic] local_mcp payload present but gate not matched (status=${deltaStatus}, phase=${deltaPhase})`,
+            );
           }
 
           const deltaResult = extractDeltaContent(chunk, targetResponseId, currentThoughtIndex, reasoningBuffer);
-          if (!deltaResult.foundStr || !deltaResult.vStr) continue;
+          if (!deltaResult.foundStr || !deltaResult.vStr) {
+            // ponytail: surface unknown phase values once per request — envelope
+            // drift (new upstream phase names) otherwise vanishes silently.
+            const phase = chunk.choices?.[0]?.delta?.phase;
+            if (phase && !KNOWN_DELTA_PHASES.has(phase) && !sawUnknownPhaseWarn) {
+              sawUnknownPhaseWarn = true;
+              logStore.log('warn', 'chat', `[Anthropic] Unrecognized delta phase: ${phase} (status=${deltaStatus})`);
+            }
+            continue;
+          }
 
           currentThoughtIndex = deltaResult.currentThoughtIndex;
 
@@ -885,6 +915,21 @@ async function handleAnthropicStream(
           toolCallCount: emittedToolCalls.length,
           contentPreview: (lastFullContent || reasoningBuffer).substring(0, 500),
         };
+        // ponytail: mark tools-sent-but-zero-parsed responses as incidents —
+        // this is the 2026-08-26 tool-loss signature (prose + end_turn with
+        // tools in the request). rawFullContent holds the discriminator:
+        // <function= fragments mean a gate parse/strip bug; clean prose means
+        // upstream never emitted calls.
+        if ((tools?.length ?? 0) > 0 && emittedToolCalls.length === 0) {
+          entry.incident = 'tools_sent_zero_parsed';
+          const tailChars = config.getInt('SUSPICIOUS_LOG_TAIL_CHARS', 2000);
+          const tail = (lastFullContent || reasoningBuffer || '').slice(-tailChars);
+          logStore.log(
+            'warn',
+            'chat',
+            `[Anthropic] INCIDENT: tools were sent but 0 tool calls were parsed (logId=${logId}). Raw output tail:\n${tail}`,
+          );
+        }
       });
 
       streamReleased = true;

@@ -89,8 +89,10 @@ export interface LogEntry {
   amplificationRatio?: number;
   amplificationTriggeredInput?: string;
   apiType?: 'openai' | 'anthropic';
+  /** Incident tag set by response paths (e.g. 'tools_sent_zero_parsed') — forces a request-log save */
+  incident?: string;
 }
-const MAX_CHUNKS_PER_ENTRY = 100;
+const MAX_CHUNKS_PER_ENTRY = 1000;
 const MAX_FIELD_LENGTH = 10240;
 export class RequestLogStore extends SystemLogger {
   private _maxEntries: number | undefined;
@@ -111,6 +113,7 @@ export class RequestLogStore extends SystemLogger {
   private requestLogDir: string | null = null;
   private requestDirMap: Map<string, string> = new Map();
   private requestFileCount = 0; // Track files written since last cleanup
+  private lastIncidentSaveAt = 0; // Rate-limits force-saved incident logs (1 per 5 min)
 
   /**
    * Enable per-request file logging. Each request gets a single JSON file
@@ -320,6 +323,16 @@ export class RequestLogStore extends SystemLogger {
     }
     if (config.get('SAVE_REQUEST_LOGS') === 'true') {
       this.saveRequestLog(id);
+    } else {
+      // ponytail: incident entries are always persisted, even when request-log
+      // saving is off — they are the diagnosable evidence for tool-loss class
+      // bugs. Rate-limited to bound disk under pathological loops.
+      const entry = this.entryMap.get(id);
+      if (entry?.incident && Date.now() - this.lastIncidentSaveAt > 5 * 60 * 1000) {
+        this.lastIncidentSaveAt = Date.now();
+        this.saveRequestLog(id);
+        this.log('warn', 'chat', `[LogStore] Incident '${entry.incident}' saved to request logs despite SAVE_REQUEST_LOGS=false`);
+      }
     }
 
     // Record to persistent monitor store (survives restarts)
@@ -366,6 +379,7 @@ export class RequestLogStore extends SystemLogger {
         account: entry.accountEmail,
         model: entry.model,
         api_type: entry.apiType || 'openai',
+        incident: entry.incident || null,
         finish_reason: entry.finalResponse?.finishReason || null,
         stream: entry.stream,
         latency_ms: entry.latency_ms,

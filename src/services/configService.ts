@@ -31,6 +31,7 @@ export interface ConfigSchema {
   DARK_MODE: string;
   CLAUDE_CODE_PROXY: string;
   TOOL_RESULT_MAX_CHARS: string;
+  SUSPICIOUS_LOG_TAIL_CHARS: string;
 }
 
 export const DEFAULT_CONFIG: ConfigSchema = {
@@ -49,7 +50,6 @@ export const DEFAULT_CONFIG: ConfigSchema = {
   MAX_LOGS: '50',
   CUSTOM_INSTRUCTION: '',
   USE_CUSTOM_INSTRUCTION: 'false',
-  SAVE_REQUEST_LOGS: 'false',
   RETRY_MAX_ATTEMPTS: '3',
   OPEN_DASHBOARD_ON_START: 'false',
   RETRY_BASE_DELAY_MS: '1000',
@@ -61,6 +61,11 @@ export const DEFAULT_CONFIG: ConfigSchema = {
   DARK_MODE: 'false',
   CLAUDE_CODE_PROXY: 'false',
   TOOL_RESULT_MAX_CHARS: '24000',
+  // ponytail: default on (2026-08-27) — the 2026-08-26 tool-loss incident was
+  // undiagnosable because request logs weren't persisted. Disk is bounded by
+  // cleanup (newest 1000 files kept) and incident force-saves are rate-limited.
+  SAVE_REQUEST_LOGS: 'true',
+  SUSPICIOUS_LOG_TAIL_CHARS: '2000',
 };
 
 const CONFIG_KEYS = new Set<string>(Object.keys(DEFAULT_CONFIG));
